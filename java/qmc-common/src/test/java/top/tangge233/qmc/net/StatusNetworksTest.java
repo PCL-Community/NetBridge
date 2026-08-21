@@ -1,0 +1,31 @@
+package top.tangge233.qmc.net;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import org.junit.jupiter.api.Test;
+
+class StatusNetworksTest {
+    @Test
+    void injectsNetworksAndKeepsOriginalFields() {
+        String input = "{\"version\":{\"name\":\"1.21.1\",\"protocol\":767},\"players\":{\"max\":10,\"online\":1},\"description\":{\"text\":\"Hello\"}}";
+        String out = StatusNetworks.addNetworks(input, 25565, "quic-raw");
+        assertTrue(out.contains("\"networks\""), out);
+        assertTrue(out.contains("\"quic-raw\""), out);
+        assertTrue(out.contains("\"protocol\":\"quic-mc/1\""), out);
+        assertTrue(out.contains("\"1.21.1\""), out);
+        Networks n = StatusNetworks.parse(out);
+        assertTrue(n.supportsQuicRaw());
+        assertEquals(25565, n.quic().port());
+        assertEquals(Networks.PROTOCOL_V1, n.quic().protocol());
+    }
+
+    @Test
+    void missingNetworksGivesEmpty() {
+        assertFalse(StatusNetworks.parse("{\"description\":{\"text\":\"x\"}}").supportsQuicRaw());
+    }
+
+    @Test
+    void badJsonGivesEmpty() {
+        assertFalse(StatusNetworks.parse("not-json").supportsQuicRaw());
+    }
+}

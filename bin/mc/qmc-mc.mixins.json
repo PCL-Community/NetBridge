@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "top.tangge233.qmc.mc.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ConnectionMixin"
+  ],
+  "client": [
+    "ClientboundStatusResponsePacketMixin",
+    "ServerStatusPingerResponseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
