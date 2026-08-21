@@ -13,26 +13,36 @@ allprojects {
 }
 
 // --- Rust cdylib 集成（根项目统一构建，ADR-0006 决策 4） ---
+// -PnativeProfile=debug|release 选择 cargo profile（默认 debug）。
+def nativeProfile = (findProperty('nativeProfile') ?: 'debug').toString()
+if (!(nativeProfile in ['debug', 'release'])) {
+    throw new GradleException("nativeProfile must be debug or release, got: ${nativeProfile}")
+}
 def cargoDir = file('rust/qmc-native')
 def cdylibDir = file("$buildDir/native")
 
 tasks.register('buildCdylib') {
     doLast {
         cdylibDir.mkdirs()
-        def pb = new ProcessBuilder('cargo', 'build')
+        def cargoArgs = ['cargo', 'build']
+        if (nativeProfile == 'release') {
+            cargoArgs << '--release'
+        }
+        def pb = new ProcessBuilder(cargoArgs)
         pb.directory(cargoDir)
+        pb.inheritIO()
         def proc = pb.start()
         def code = proc.waitFor()
         if (code != 0) {
             throw new GradleException("cargo build failed with exit code " + code)
         }
-        def src = file('rust/qmc-native/target/debug/libqmc_native.so')
+        def src = file("rust/qmc-native/target/${nativeProfile}/libqmc_native.so")
         if (!src.exists()) {
             throw new GradleException("Rust cdylib not found after cargo build: ${src}")
         }
         def dst = new File(cdylibDir, src.name)
         Files.copy(src.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        println "copied native: ${src} -> ${dst}"
+        println "copied native (${nativeProfile}): ${src} -> ${dst}"
     }
 }
 
