@@ -6,6 +6,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import top.tangge233.qmc.fabric.mc.QuicServerTransport;
 import top.tangge233.qmc.server.QuicServer;
 
 /**
@@ -17,6 +18,7 @@ public class MinecraftServerLifecycleMixin {
     @Inject(method = "runServer", at = @At("HEAD"))
     private void qmc$startAcceptor(CallbackInfo ci) {
         MinecraftServer self = (MinecraftServer) (Object) this;
+        QuicServer.setConnectionHandler(connId -> QuicServerTransport.adopt(self, connId));
         QuicServer.start(self.getPort());
     }
 
@@ -26,6 +28,7 @@ public class MinecraftServerLifecycleMixin {
      */
     @Inject(method = "close()V", remap = false, at = @At("HEAD"))
     private void qmc$stopAcceptor(CallbackInfo ci) {
+        QuicServer.setConnectionHandler(null);
         QuicServer.stop();
     }
 }
