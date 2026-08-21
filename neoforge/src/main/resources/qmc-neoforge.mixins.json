@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "top.tangge233.qmc.neoforge.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "StatusResponseWriteMixin"
+  ],
+  "client": [
+    "ConnectionMixin",
+    "ClientboundStatusResponsePacketMixin",
+    "ServerStatusPingerResponseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

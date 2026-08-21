@@ -1,99 +1,17 @@
 plugins {
-    id 'java-library'
-    id 'net.neoforged.moddev' version '1.0.11'
+    id 'net.neoforged.moddev' version '1.0.11' apply false
+    id 'fabric-loom' version "${loomVersion}" apply false
 }
 
-group = 'dev.qmc'
-version = '0.1.0'
-
-repositories {
-    maven { url = 'https://maven.aliyun.com/repository/public' }
-    maven { url = 'https://maven.fabricmc.net' }
-    maven { url = 'https://maven.neoforged.net' }
-    mavenCentral()
+allprojects {
+    group = mavenGroup
+    version = modVersion
 }
 
-java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
-    withSourcesJar()
-}
-
-configurations {
-    compileFabric
-}
-
-dependencies {
-    compileFabric "net.fabricmc:fabric-loader:0.17.2"
-    compileFabric "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
-    implementation "com.google.code.gson:gson:2.10.1"
-    // 与 MC 1.21.1 内置 Netty 版本一致（QuicChannel 适配器用）。
-    implementation "io.netty:netty-common:4.1.97.Final"
-    implementation "io.netty:netty-buffer:4.1.97.Final"
-    implementation "io.netty:netty-transport:4.1.97.Final"
-    implementation "io.netty:netty-handler:4.1.97.Final"
-}
-
-// 我们的源码根在 java/qmc-common/...，需显式告诉 Gradle sourceSets。
-sourceSets {
-    main {
-        java.srcDirs = ['java/qmc-common/src/main/java']
-        resources.srcDirs = []
-    }
-    test {
-        java.srcDirs = ['java/qmc-common/src/test/java']
-    }
-    mc {
-        java.srcDirs = ['java/qmc-mc/src/main/java']
-        resources.srcDirs = ['java/qmc-mc/src/main/resources']
-        compileClasspath += sourceSets.main.output
-        compileClasspath += sourceSets.main.compileClasspath
-        compileClasspath += configurations.compileFabric
-        compileClasspath += files('build/moddev/artifacts/neoforge-21.1.183-minecraft-merged.jar')
-        runtimeClasspath += sourceSets.main.output
-    }
-    neoforge {
-        java.srcDirs = ['java/qmc-neoforge/src/main/java']
-        resources.srcDirs = ['java/qmc-neoforge/src/main/resources']
-        compileClasspath += sourceSets.main.output
-        compileClasspath += sourceSets.mc.output
-        runtimeClasspath += sourceSets.main.output
-        runtimeClasspath += sourceSets.mc.output
-    }
-    fabric {
-        java.srcDirs = ['java/qmc-fabric/src/main/java']
-        resources.srcDirs = ['java/qmc-fabric/src/main/resources']
-        compileClasspath += configurations.compileFabric
-        compileClasspath += sourceSets.main.output
-        compileClasspath += sourceSets.mc.output
-        compileClasspath += files('build/moddev/artifacts/neoforge-21.1.183-minecraft.jar')
-        runtimeClasspath += configurations.compileFabric
-        runtimeClasspath += sourceSets.main.output
-        runtimeClasspath += sourceSets.mc.output
-    }
-}
-
-// mc sourceSet 编译依赖 moddev 生成的 merged jar。
-tasks.named('compileMcJava') {
-    dependsOn tasks.named('createMinecraftArtifacts')
-}
-
-neoForge {
-    version = '21.1.183'
-    validateAccessTransformers = true
-    addModdingDependenciesTo sourceSets.neoforge
-    mods {
-        qmc {
-            sourceSet sourceSets.neoforge
-        }
-    }
-}
-
-// --- Rust cdylib 集成 ---
+// --- Rust cdylib 集成（根项目统一构建，ADR-0006 决策 4） ---
 def cargoDir = file('rust/qmc-native')
 def cdylibDir = file("$buildDir/native")
 
-// 先在顶层注册 buildCdylib，使 test/jar 都能依赖它。
 tasks.register('buildCdylib') {
     doLast {
         cdylibDir.mkdirs()
@@ -115,46 +33,30 @@ tasks.register('buildCdylib') {
     }
 }
 
-tasks.named('test') {
-    useJUnitPlatform()
-    dependsOn(tasks.named('buildCdylib'))
-    jvmArgs("-Djava.library.path=${cdylibDir}")
-}
+// --- 产物聚合（ADR-0006 决策 5）：双平台 jar 收集到根 build/libs/ ---
+def rootLibs = layout.buildDirectory.dir('libs')
 
-// JUnit 5（确保国内镜像可解析）
-def junitVersion = '5.11.0'
-dependencies {
-    testImplementation "org.junit.jupiter:junit-jupiter-api:${junitVersion}"
-    testImplementation "org.junit.jupiter:junit-jupiter-engine:${junitVersion}"
-    testImplementation "org.junit.jupiter:junit-jupiter-params:${junitVersion}"
-    testImplementation "org.junit.platform:junit-platform-launcher:1.11.0"
-    testImplementation "org.junit.platform:junit-platform-engine:1.11.0"
-    testImplementation "org.junit.platform:junit-platform-commons:1.11.0"
-    testRuntimeOnly "org.junit.platform:junit-platform-console:1.11.0"
-}
-
-tasks.named('jar') {
-    dependsOn(tasks.named('buildCdylib'))
-    from(cdylibDir) { into 'native/' }
-    from(sourceSets.neoforge.output)
-    from(sourceSets.mc.output)
-    from(sourceSets.main.output)
-}
-
-tasks.register('jarNeoForge', Jar) {
+tasks.register('assembleAll') {
+    group = 'build'
+    description = 'Assemble both platform mod jars into root build/libs/.'
     dependsOn tasks.named('buildCdylib')
-    archiveFileName = "qmc-neoforge-0.1.0.jar"
-    from(sourceSets.neoforge.output)
-    from(sourceSets.mc.output)
-    from(sourceSets.main.output)
-    from(cdylibDir) { into 'native/' }
+    dependsOn ':neoforge:jarNeoForge'
+    dependsOn ':fabric:remapJar'
+    doLast {
+        copy {
+            from project(':neoforge').layout.buildDirectory.file("libs/qmc-neoforge-${modVersion}.jar")
+            into rootLibs
+        }
+        copy {
+            from project(':fabric').tasks.named('remapJar').flatMap { it.archiveFile }
+            rename { "qmc-fabric-${modVersion}.jar" }
+            into rootLibs
+        }
+    }
 }
 
-tasks.register('jarFabric', Jar) {
-    dependsOn tasks.named('buildCdylib')
-    archiveFileName = "qmc-fabric-0.1.0.jar"
-    from(sourceSets.fabric.output)
-    from(sourceSets.mc.output)
-    from(sourceSets.main.output)
-    from(cdylibDir) { into 'native/' }
+tasks.register('printVersions') {
+    doLast {
+        println "Minecraft: ${minecraftVersion} (NeoForge ${neoForgeVersion} / Fabric ${minecraftVersion})"
+    }
 }

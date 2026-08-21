@@ -1,0 +1,44 @@
+plugins {
+    id 'java-library'
+    id 'fabric-loom'
+}
+
+repositories {
+    maven { url = 'https://maven.aliyun.com/repository/public' }
+    maven { url = 'https://maven.fabricmc.net' }
+    mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraftVersion}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:0.17.2"
+    // Mixin 注解处理器：mojmap 源码编译 + remapJar 重映射
+    annotationProcessor 'net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7'
+    implementation project(':common')
+    implementation "io.netty:netty-common:4.1.97.Final"
+    implementation "io.netty:netty-buffer:4.1.97.Final"
+    implementation "io.netty:netty-transport:4.1.97.Final"
+    implementation "io.netty:netty-handler:4.1.97.Final"
+}
+
+processResources {
+    inputs.property 'version', modVersion
+    filesMatching('fabric.mod.json') {
+        expand 'version': modVersion
+    }
+}
+
+def cdylibDir = rootProject.layout.buildDirectory.dir('native')
+
+tasks.named('jar') {
+    dependsOn(rootProject.tasks.named('buildCdylib'))
+    from(cdylibDir) { into 'native/' }
+    from(project(':common').sourceSets.main.output)
+}

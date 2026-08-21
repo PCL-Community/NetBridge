@@ -1,0 +1,40 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev'
+}
+
+repositories {
+    maven { url = 'https://maven.aliyun.com/repository/public' }
+    maven { url = 'https://maven.neoforged.net' }
+    mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+dependencies {
+    implementation project(':common')
+    implementation "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
+}
+
+neoForge {
+    version = neoForgeVersion
+    validateAccessTransformers = true
+    mods {
+        qmc {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+def cdylibDir = rootProject.layout.buildDirectory.dir('native')
+
+tasks.register('jarNeoForge', Jar) {
+    dependsOn(rootProject.tasks.named('buildCdylib'))
+    archiveFileName = "qmc-neoforge-${modVersion}.jar"
+    from(sourceSets.main.output)
+    from(project(':common').sourceSets.main.output)
+    from(cdylibDir) { into 'native/' }
+}

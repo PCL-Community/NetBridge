@@ -7,4 +7,9 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+
 rootProject.name = 'quic-mc'
+
+include 'common'
+include 'neoforge'
+include 'fabric'

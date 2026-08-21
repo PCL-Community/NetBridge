@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "top.tangge233.qmc.fabric.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "StatusResponseWriteMixin",
+    "MinecraftServerLifecycleMixin",
+    "ConnectionMixin",
+    "ClientboundStatusResponsePacketMixin",
+    "ServerStatusPingerResponseMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

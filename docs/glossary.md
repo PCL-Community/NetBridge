@@ -32,8 +32,12 @@
 
 ## 构建与工具
 
-- **Bazel**：构建工具框架，统一构建 Java 模块与 Rust cdylib（`rules_rust`）。
-- **mise**：工具链版本管理器，管理 Bazel/Bazelisk、JDK 21、Rust 等版本。
+- **Gradle 多模块构建**：单 Gradle 构建内 include `:common` / `:neoforge` / `:fabric` 三个子项目（ADR-0006）。根项目负责 Rust cdylib 与产物聚合。
+- **ModDevGradle**：NeoForge 官方 Gradle 插件，仅应用于 `:neoforge`，提供 mojmap 命名的 Minecraft 依赖。
+- **Fabric Loom**：Fabric 官方 Gradle 插件，仅应用于 `:fabric`，提供 minecraft 依赖、`remapJar`（mojmap→intermediary）与 `runClient` 开发环境。
+- **Intermediary 映射**：Fabric 运行时的中性类命名（如 `net.minecraft.class_2535`）。Fabric mod 必须在打包时由 Loom 从 Mojang 映射重映射到 intermediary，否则无法加载。
+- **remapJar**：Loom 的重映射打包任务，产出可在 Fabric Loader 加载的 jar。
+- **mise**：工具链版本管理器，管理 JDK 21、Gradle 等版本。
 - **cdylib（.so）**：Rust 编译产出的共享库，通过 JNI 被 Java 加载。
 - **rules_rust**：Bazel 官方 Rust 规则集，用于 `rust_shared_library` 构建 cdylib。
 - **quinn-plaintext**：基于 quinn-proto 的明文化传输插件（无 TLS），用于本项目的 QUIC 管道。
@@ -46,6 +50,10 @@
 3. **JNI 桥**：批量字节队列，Java ⇄ Rust 数据交换。
 4. **Rust QUIC 传输层**：quinn-plaintext endpoint、QUIC 流、UDP socket、tokio runtime（**无 TLS/无压缩**）。
 
+## 版本锁定约定
+
+- **Minecraft 1.21.1 双平台锁定**：`:neoforge`（NeoForge 21.1.183）与 `:fabric`（`minecraft_version=1.21.1`）必须锁定同一 MC 版本；升级时同步修改 `gradle.properties` 并双平台回归（ADR-0006）。
+
 ## 决策记录索引
 
 - ADR-0001：传输架构（TCP 保留 + QUIC 可选，quinn-plaintext 管道，无 TLS/无 zstd/无指纹）
@@ -53,3 +61,4 @@
 - ADR-0003：认证与加密（**已否决**——无认证解耦/无指纹，原版认证与加密不变）
 - ADR-0004：zstd 流压缩（**已否决**——不引入压缩层）
 - ADR-0005：对其它模组的透明性边界（普通 mod 透明；传输层独占 mod 不承诺共存）
+- ADR-0006：多模块构建架构（common/neoforge/fabric 三子项目；共享 MC 逻辑按平台复制源码；Fabric 走 Loom remapJar）
