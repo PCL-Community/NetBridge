@@ -9,7 +9,8 @@
   "client": [
     "ConnectionMixin",
     "ClientboundStatusResponsePacketMixin",
-    "ServerStatusPingerResponseMixin"
+    "ServerStatusPingerResponseMixin",
+    "JoinMultiplayerScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

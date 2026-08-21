@@ -9,6 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.qmc.neoforge.mc.QuicClientTransport;
+import top.tangge233.qmc.net.Networks;
 import top.tangge233.qmc.net.QuicClient;
 import top.tangge233.qmc.net.QuicTarget;
 
@@ -31,12 +32,23 @@ public abstract class ConnectionMixin {
             Connection connection,
             CallbackInfoReturnable<ChannelFuture> cir) {
         if (!QuicClient.quicEnabled() || Boolean.TRUE.equals(QUIC_IN_PROGRESS.get())) {
+            QuicClient.logTransportChoice(address, false,
+                    !QuicClient.quicEnabled() ? "mode=" + QuicClient.mode() : "fallback in progress");
             return;
         }
         QuicTarget target = QuicClient.quicTargetFor(address);
         if (target == null) {
+            Networks networks = QuicClient.networksFor(address);
+            String reason = networks.supportsQuicRaw()
+                    ? "no quic port advertised"
+                    : (networks.quicInfo().isEmpty() ? "server did not advertise networks" : "quic-raw not supported");
+            if (QuicClient.quicEnabled()) {
+                QuicClient.logTransportChoice(address, false, reason);
+            }
             return;
         }
+        QuicClient.logTransportChoice(address, true,
+                "mode=" + QuicClient.mode() + ", quicPort=" + target.quicPort());
         QUIC_IN_PROGRESS.set(Boolean.TRUE);
         try {
             cir.setReturnValue(QuicClientTransport.connectWithFallback(address, useEpoll, connection, target));

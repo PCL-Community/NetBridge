@@ -5,29 +5,42 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 
 /**
  * 客户端 QUIC 传输决策与能力缓存（ADR-0002 / ADR-0005）。
  *
- * 全局开关：系统属性 {@code qmc.transport}，取值
- * {@code tcp}（默认）、{@code quic}、{@code quic_fallback}。
+ * 传输模式：游戏内设置界面切换（多人游戏屏幕底部按钮），
+ * 初始值取系统属性 {@code qmc.transport}（可选），默认 TCP。
  */
 public final class QuicClient {
     public static final String PROP_MODE = "qmc.transport";
+    public static final Logger LOGGER = Logger.getLogger("qmc.client");
 
     private static final Map<String, Networks> NETWORKS = new ConcurrentHashMap<>();
     private static final Set<String> FAILED = ConcurrentHashMap.newKeySet();
 
+    private static volatile TransportMode mode = parseMode(System.getProperty(PROP_MODE, "tcp"));
+
     private QuicClient() {}
 
-    /** 当前传输模式（ADR-0002）。 */
-    public static TransportMode mode() {
-        String value = System.getProperty(PROP_MODE, "tcp").trim().toLowerCase(Locale.ROOT);
-        return switch (value) {
+    private static TransportMode parseMode(String value) {
+        return switch (value == null ? "tcp" : value.trim().toLowerCase(Locale.ROOT)) {
             case "quic", "quic_only", "quic-only" -> TransportMode.QUIC_ONLY;
             case "quic_fallback", "quic-fallback", "fallback" -> TransportMode.QUIC_WITH_TCP_FALLBACK;
             default -> TransportMode.TCP_ONLY;
         };
+    }
+
+    /** 当前传输模式（ADR-0002）。 */
+    public static TransportMode mode() {
+        return mode;
+    }
+
+    /** 运行时切换传输模式（游戏内设置界面调用）。 */
+    public static void setMode(TransportMode newMode) {
+        mode = newMode == null ? TransportMode.TCP_ONLY : newMode;
+        LOGGER.info("Transport mode set to " + mode);
     }
 
     public static boolean quicEnabled() {
@@ -68,7 +81,9 @@ public final class QuicClient {
      */
     public static QuicTarget quicTargetFor(InetSocketAddress tcpAddress) {
         TransportMode mode = mode();
-        if (mode == TransportMode.TCP_ONLY || tcpAddress == null || isQuicFailed(tcpAddress)) {
+        // 注意：不因上次失败拉黑地址（ADR-0002 fallback 语义：
+        // 每次连接都重新尝试 QUIC，失败仅影响本次）。
+        if (mode == TransportMode.TCP_ONLY || tcpAddress == null) {
             return null;
         }
         Networks networks = networksFor(tcpAddress);
@@ -80,6 +95,11 @@ public final class QuicClient {
             return null;
         }
         return new QuicTarget(quicPort, mode == TransportMode.QUIC_WITH_TCP_FALLBACK);
+    }
+
+    /** 记录连接传输决策（游戏日志可见，便于诊断）。 */
+    public static void logTransportChoice(InetSocketAddress address, boolean useQuic, String reason) {
+        LOGGER.info("Transport for " + address + ": " + (useQuic ? "QUIC" : "TCP") + " (" + reason + ")");
     }
 
     private static String key(InetSocketAddress address) {
