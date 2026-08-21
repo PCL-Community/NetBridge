@@ -43,7 +43,7 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
             ConnHandle {
                 state: state.clone(),
                 to_java: Mutex::new((to_java_rx, Vec::new())),
-                to_quic: to_quic_tx,
+                to_quic: to_quic_tx.clone(),
                 server_id: None,
                 reported: std::sync::atomic::AtomicBool::new(true),
             },
@@ -76,7 +76,10 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
             }
         };
         state.store(super::STATE_CONNECTED, Ordering::SeqCst);
-        run_connection(conn_id, conn, send, recv, to_quic_rx, to_java_tx, state).await;
+        run_connection(
+            conn_id, conn, send, recv, to_quic_rx, to_java_tx, to_quic_tx, state,
+        )
+        .await;
     });
     Ok(conn_id)
 }

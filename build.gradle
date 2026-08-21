@@ -1,3 +1,7 @@
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+
 plugins {
     id 'net.neoforged.moddev' version '1.0.11' apply false
     id 'fabric-loom' version "${loomVersion}" apply false
@@ -26,10 +30,51 @@ tasks.register('buildCdylib') {
         if (!src.exists()) {
             throw new GradleException("Rust cdylib not found after cargo build: ${src}")
         }
-        def dst = file("${cdylibDir}/${src.name}")
-        dst.createNewFile()
-        src.withInputStream { inp -> dst.withOutputStream { out -> out.write(inp.readAllBytes()) } }
+        def dst = new File(cdylibDir, src.name)
+        Files.copy(src.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING)
         println "copied native: ${src} -> ${dst}"
+    }
+}
+
+// --- 双平台源码副本同步校验（ADR-0006：共享 MC 逻辑按平台复制源码） ---
+// 副本仅允许 package/import 差异（平台包名不同），其余必须逐字一致。
+def syncedCopies = [
+    ['mc/QuicClientTransport.java', 'mc/QuicClientTransport.java'],
+    ['mc/QuicServerTransport.java', 'mc/QuicServerTransport.java'],
+    ['mixin/ClientboundStatusResponsePacketMixin.java', 'mixin/ClientboundStatusResponsePacketMixin.java'],
+    ['mixin/ConnectionMixin.java', 'mixin/ConnectionMixin.java'],
+    ['mixin/JoinMultiplayerScreenMixin.java', 'mixin/JoinMultiplayerScreenMixin.java'],
+    ['mixin/ServerStatusPingerResponseMixin.java', 'mixin/ServerStatusPingerResponseMixin.java'],
+    ['mixin/StatusResponseWriteMixin.java', 'mixin/StatusResponseWriteMixin.java'],
+]
+
+tasks.register('checkSyncedCopies') {
+    group = 'verification'
+    description = 'Verifies fabric/neoforge source copies stay in sync (ADR-0006).'
+    doLast {
+        def base = [
+            fabric  : file('fabric/src/main/java/top/tangge233/qmc/fabric'),
+            neoforge: file('neoforge/src/main/java/top/tangge233/qmc/neoforge'),
+        ]
+        def normalize = { f -> f.readLines().findAll {
+            def t = it.trim()
+            t && !(t.startsWith('package ') || t.startsWith('import '))
+        }*.trim().join('\n') }
+        def failed = []
+        syncedCopies.each { rel ->
+            def fabFile = new File(base.fabric, rel[0])
+            def neoFile = new File(base.neoforge, rel[1])
+            if (!fabFile.exists() || !neoFile.exists()) {
+                failed << "${rel[0]}: missing (${fabFile.exists() ? 'neoforge' : 'fabric'} side)"
+            } else if (normalize(fabFile) != normalize(neoFile)) {
+                failed << "${rel[0]}: content diverged between :fabric and :neoforge"
+            }
+        }
+        if (failed) {
+            throw new GradleException(
+                'Synced source copies out of sync (ADR-0006):\n  ' + failed.join('\n  '))
+        }
+        println "synced copies OK (${syncedCopies.size()} pairs)"
     }
 }
 
@@ -40,6 +85,7 @@ tasks.register('assembleAll') {
     group = 'build'
     description = 'Assemble both platform mod jars into root build/libs/.'
     dependsOn tasks.named('buildCdylib')
+    dependsOn tasks.named('checkSyncedCopies')
     dependsOn ':neoforge:jarNeoForge'
     dependsOn ':fabric:remapJar'
     doLast {

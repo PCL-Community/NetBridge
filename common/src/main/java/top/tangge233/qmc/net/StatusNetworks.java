@@ -22,7 +22,13 @@ public final class StatusNetworks {
      */
     public static String addNetworks(String statusJson, int quicPort, String... features) {
         Objects.requireNonNull(statusJson, "statusJson");
-        JsonObject root = JsonParser.parseString(statusJson).getAsJsonObject();
+        JsonObject root;
+        try {
+            root = JsonParser.parseString(statusJson).getAsJsonObject();
+        } catch (RuntimeException e) {
+            // 非有效 JSON 对象：原样返回，不阻断 status 编码。
+            return statusJson;
+        }
         if (root.has(Networks.KEY_NETWORKS)) {
             return statusJson;
         }

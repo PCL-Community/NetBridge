@@ -54,7 +54,11 @@ public class QuicChannel extends AbstractChannel {
 
     /**
      * 收养一条已由服务端 acceptor 建立好的 QUIC 连接（服务端侧使用）。
-     * 注册到事件循环后即可读写。
+     *
+     * 注意：adopt 后 channel 处于 active 状态但轮询器尚未启动；需将 channel
+     * 注册到 EventLoopGroup——注册完成触发 channelActive，autoRead 由此
+     * 调用 doBeginRead 启动轮询器，数据才开始流入管线（见平台侧
+     * QuicServerTransport）。
      */
     public static QuicChannel adopt(long connId) {
         QuicChannel channel = new QuicChannel();
@@ -145,8 +149,9 @@ public class QuicChannel extends AbstractChannel {
             int accepted = QuicNative.writeChunk(connId, data);
             if (accepted < 0) {
                 in.remove(new IOException("quic write failed: " + QuicNative.lastError()));
-                connected = false;
-                pipeline().fireChannelInactive();
+                // 统一经 close() 触发 channelInactive（此刻 connected 仍为 true，
+                // close 会正确发一次 inactive 并失败其余出站消息）。
+                unsafe().close(voidPromise());
                 return;
             }
             if (accepted == 0) {
@@ -238,7 +243,7 @@ public class QuicChannel extends AbstractChannel {
             if (p != null && !p.isDone()) {
                 p.tryFailure(new ClosedChannelException());
             }
-            pipeline().fireChannelInactive();
+            // 不手动 fireChannelInactive：connected 仍为 true，close() 会恰好触发一次。
             unsafe().close(voidPromise());
             return;
         }

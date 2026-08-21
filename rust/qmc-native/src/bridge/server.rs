@@ -2,7 +2,6 @@
 
 use std::sync::atomic::Ordering;
 
-use super::client;
 use super::connection::run_connection;
 use super::registry::{allocate_id, registry, runtime};
 use super::{Command, ConnHandle, STATE_CONNECTED, STATE_FAILED, ServerHandle};
@@ -71,6 +70,7 @@ pub fn start_server(port: u16) -> Result<u64, String> {
                                 recv,
                                 reg.to_quic_rx,
                                 reg.to_java_tx,
+                                reg.to_quic_tx,
                                 reg.state,
                             )
                             .await;
@@ -136,6 +136,7 @@ pub struct Registered {
     pub conn_id: u64,
     pub to_quic_rx: tokio::sync::mpsc::Receiver<Command>,
     pub to_java_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub to_quic_tx: tokio::sync::mpsc::Sender<Command>,
     pub state: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -151,7 +152,7 @@ fn register_connection(server_id: u64) -> Registered {
             ConnHandle {
                 state: state.clone(),
                 to_java: std::sync::Mutex::new((to_java_rx, Vec::new())),
-                to_quic: to_quic_tx,
+                to_quic: to_quic_tx.clone(),
                 server_id: Some(server_id),
                 reported: std::sync::atomic::AtomicBool::new(false),
             },
@@ -162,10 +163,7 @@ fn register_connection(server_id: u64) -> Registered {
         conn_id,
         to_quic_rx,
         to_java_tx,
+        to_quic_tx,
         state,
     }
 }
-
-// 保持 client 模块被引用（测试用其常量）；实际导出见 client.rs。
-#[allow(unused_imports)]
-use client as _client_marker;

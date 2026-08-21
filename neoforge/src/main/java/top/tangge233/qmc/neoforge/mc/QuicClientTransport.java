@@ -44,13 +44,12 @@ public final class QuicClientTransport {
             closeQuietly(quicFuture.channel());
             if (target.allowTcpFallback() && !pipelineAttached.get()) {
                 // Connection 尚未挂载到任何管线，可安全走原版 TCP。
-                QuicClient.LOGGER.warning("QUIC handshake to " + tcpAddress
-                        + " failed (" + t.getMessage() + "), falling back to TCP for this connection");
+                QuicClient.LOGGER.warn("QUIC handshake to {} failed ({}), falling back to TCP for this connection",
+                        tcpAddress, t.getMessage());
                 return Connection.connect(tcpAddress, useEpoll, connection);
             }
             if (pipelineAttached.get()) {
-                QuicClient.LOGGER.warning("QUIC connection to " + tcpAddress
-                        + " failed after pipeline attach; cannot fall back");
+                QuicClient.LOGGER.warn("QUIC connection to {} failed after pipeline attach; cannot fall back", tcpAddress);
             }
             return quicFuture;
         }
@@ -75,7 +74,6 @@ public final class QuicClientTransport {
                         // 关键：管线挂载延迟到握手成功（channelActive）之后，
                         // 保证失败路径上 Connection 未被消费，可安全回退 TCP。
                         channel.pipeline().addLast(new io.netty.channel.ChannelInboundHandlerAdapter() {
-
                             @Override
                             public void channelActive(io.netty.channel.ChannelHandlerContext ctx) {
                                 if (pipelineAttached.compareAndSet(false, true)) {

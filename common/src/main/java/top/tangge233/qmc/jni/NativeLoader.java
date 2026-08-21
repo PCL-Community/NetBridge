@@ -38,6 +38,7 @@ public final class NativeLoader {
                 throw new IllegalStateException("native resource not found in classpath: " + resource);
             }
             Path tmp = Files.createTempFile("qmc_native_", nativeResourceName());
+            tmp.toFile().deleteOnExit();
             try (OutputStream out = Files.newOutputStream(tmp)) {
                 in.transferTo(out);
             }

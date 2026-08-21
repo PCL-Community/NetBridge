@@ -17,12 +17,18 @@ pub fn connection_state(conn: u64) -> Option<u32> {
 
 /// 关闭连接（优雅结束发送侧，等待 QUIC 任务收尾）。
 pub fn close_connection(conn: u64) -> bool {
-    let reg = registry().lock().unwrap();
+    let mut reg = registry().lock().unwrap();
     let Some(handle) = reg.conns.get(&conn) else {
         return false;
     };
-    handle.state.store(super::STATE_CLOSED, Ordering::SeqCst);
-    handle.to_quic.try_send(Command::Close).is_ok()
+    let was = handle.state.swap(super::STATE_CLOSED, Ordering::SeqCst);
+    let ok = handle.to_quic.try_send(Command::Close).is_ok();
+    // FAILED 且无存活任务收尾的连接（如客户端握手失败）：由 close 兜底
+    // 移除注册表条目，否则泄漏；有任务时其收尾 remove 为幂等 no-op。
+    if was == super::STATE_FAILED {
+        reg.conns.remove(&conn);
+    }
+    ok
 }
 
 /// 写入一段字节到 QUIC 流。返回实际入队字节数：
@@ -85,6 +91,11 @@ pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
 use tokio::sync::mpsc;
 
 /// 单连接读写循环：读侧推入 Java 队列，写侧消费 Java 命令。
+///
+/// 关闭传播：reader 检测到对端关闭（流结束/错误）后 drop 自己持有的
+/// `to_quic_tx` 克隆，使主循环 `to_quic_rx.recv()` 返回 None 而收尾
+/// （置 CLOSED、清理 registry）。此后 Java 侧 writeChunk 也会因 channel
+/// 关闭得到错误——读写两条路径都能感知连接死亡，客户端不会挂起。
 pub async fn run_connection(
     conn_id: u64,
     conn: quinn::Connection,
@@ -92,22 +103,28 @@ pub async fn run_connection(
     mut recv: quinn::RecvStream,
     mut to_quic_rx: mpsc::Receiver<Command>,
     to_java_tx: mpsc::Sender<Vec<u8>>,
+    to_quic_tx: mpsc::Sender<Command>,
     state: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
-    let reader = tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536];
-        loop {
-            match recv.read(&mut buf).await {
-                Ok(Some(n)) => {
-                    if to_java_tx.send(buf[..n].to_vec()).await.is_err() {
-                        break;
+    let reader = {
+        let to_quic_tx = to_quic_tx.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            loop {
+                match recv.read(&mut buf).await {
+                    Ok(Some(n)) => {
+                        if to_java_tx.send(buf[..n].to_vec()).await.is_err() {
+                            break;
+                        }
                     }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
-                Ok(None) => break,
-                Err(_) => break,
             }
-        }
-    });
+            // 对端已关闭：释放 sender，令主循环的 recv() 返回 None。
+            drop(to_quic_tx);
+        })
+    };
 
     loop {
         tokio::select! {
@@ -128,7 +145,14 @@ pub async fn run_connection(
         }
     }
 
-    state.store(super::STATE_CLOSED, Ordering::SeqCst);
+    // 仅从活跃态迁移到 CLOSED；写失败已置的 FAILED 保留
+    // （Java poll 依赖 FAILED/CLOSED 区分异常类型与 lastError）。
+    match state.load(Ordering::SeqCst) {
+        super::STATE_CONNECTING | super::STATE_CONNECTED => {
+            state.store(super::STATE_CLOSED, Ordering::SeqCst);
+        }
+        _ => {}
+    }
     reader.abort();
     let _ = reader.await;
     conn.close(0u32.into(), b"qmc close");

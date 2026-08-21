@@ -42,7 +42,9 @@ public abstract class JoinMultiplayerScreenMixin extends Screen {
                 .withValues(TransportMode.values())
                 .withInitialValue(QuicClient.mode())
                 .displayOnlyValue()
-                .create(5, this.height - 24, 110, 20,
+                // 左上角：原版底部 64px 是两行居中按钮块（select/edit/refresh 等），
+                // 放底部会与其重叠；顶部左侧仅居中标题，无控件。
+                .create(5, 6, 110, 20,
                         Component.literal("传输模式"),
                         (btn, mode) -> QuicClient.setMode(mode));
         this.addRenderableWidget(button);

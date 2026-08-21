@@ -1,8 +1,8 @@
 package top.tangge233.qmc.server;
 
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import top.tangge233.qmc.jni.NativeLoader;
 import top.tangge233.qmc.jni.QuicNative;
 
@@ -13,12 +13,11 @@ import top.tangge233.qmc.jni.QuicNative;
  * {@link #port()} 宣告真实 UDP 端口。
  */
 public final class QuicServer {
-    public static final Logger LOGGER = Logger.getLogger("qmc.server");
+    public static final Logger LOGGER = LoggerFactory.getLogger("qmc");
 
     private static volatile long serverHandle = -1;
     private static volatile int port = -1;
     private static volatile LongConsumer connectionHandler;
-    private static final AtomicBoolean accepting = new AtomicBoolean(false);
 
     private QuicServer() {}
 
@@ -39,25 +38,29 @@ public final class QuicServer {
         NativeLoader.load();
         long handle = QuicNative.startServer(preferredPort);
         if (handle < 0) {
-            LOGGER.warning("QUIC acceptor start failed: " + QuicNative.lastError());
+            LOGGER.warn("QUIC acceptor start failed: {}", QuicNative.lastError());
             return false;
         }
         int actual = QuicNative.serverPort(handle);
         serverHandle = handle;
         port = actual;
         startAcceptLoop(handle);
-        LOGGER.info("QUIC acceptor listening on udp/" + actual);
+        LOGGER.info("QUIC acceptor listening on udp/{}", actual);
         return true;
     }
 
-    /** 后台轮询 acceptConnections，把新连接交给 mod 层处理器。 */
+    /**
+     * 后台轮询 acceptConnections，把新连接交给 mod 层处理器。
+     *
+     * 线程以 {@code serverHandle == handle} 为唯一存活条件：stop() 置空
+     * handle 后线程自行退出；stop 后重新 start 会启动新线程，旧线程因
+     * handle 不匹配退出，无需显式取消。start 由 synchronized + 幂等检查
+     * 保护，每个 handle 只会启动一个 accept 线程。
+     */
     private static void startAcceptLoop(long handle) {
-        if (!accepting.compareAndSet(false, true)) {
-            return;
-        }
         Thread thread = new Thread(() -> {
             try {
-                while (accepting.get() && serverHandle == handle) {
+                while (serverHandle == handle) {
                     long[] ids = QuicNative.acceptConnections(handle);
                     LongConsumer handler = connectionHandler;
                     for (long id : ids) {
@@ -65,11 +68,11 @@ public final class QuicServer {
                             try {
                                 handler.accept(id);
                             } catch (Throwable t) {
-                                LOGGER.warning("QUIC connection handler failed for conn " + id + ": " + t);
+                                LOGGER.warn("QUIC connection handler failed for conn {}", id, t);
                                 QuicNative.closeConnection(id);
                             }
                         } else {
-                            LOGGER.warning("QUIC connection " + id + " rejected: no connection handler registered");
+                            LOGGER.warn("QUIC connection {} rejected: no connection handler registered", id);
                             QuicNative.closeConnection(id);
                         }
                     }
@@ -77,8 +80,6 @@ public final class QuicServer {
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-            } finally {
-                accepting.set(false);
             }
         }, "qmc-quic-accept");
         thread.setDaemon(true);
@@ -93,7 +94,6 @@ public final class QuicServer {
         QuicNative.stopServer(serverHandle);
         serverHandle = -1;
         port = -1;
-        accepting.set(false);
         LOGGER.info("QUIC acceptor stopped");
     }
 

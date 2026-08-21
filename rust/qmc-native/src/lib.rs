@@ -203,6 +203,26 @@ mod tests {
         }
     }
 
+    /// 等待连接脱离 CONNECTED（CLOSED 或已被 registry 移除→UNKNOWN）。
+    /// 注意：收尾时 store(CLOSED) 与 remove 几乎同时发生，CLOSED 窗口
+    /// 极短，轮询通常直接观察到 UNKNOWN——两者均视为“已感知关闭”
+    /// （与 Java QuicChannel.poll 的判定一致）。
+    ///
+    /// deadline 必须明显大于 quinn 默认 max_idle_timeout（30s）：对端
+    /// CONNECTION_CLOSE 未及时到达时，客户端靠 idle 超时感知关闭，
+    /// 恰好 30s 的 deadline 会与超时点竞态导致偶发失败。
+    fn wait_disconnected(conn: u64) {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            match connection_state(conn) {
+                Some(STATE_CONNECTED) => {}
+                _ => return,
+            }
+            assert!(Instant::now() < deadline, "timeout waiting for disconnect");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn wait_read(conn: u64, want: usize) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -268,6 +288,37 @@ mod tests {
         assert_eq!(connection_state(client), Some(STATE_CLOSED));
     }
 
+    /// 对端关闭传播：服务端主动关闭后，客户端应感知到 CLOSED。
+    /// （回归保护：生产中服务端拒绝/异常关闭连接时客户端不能挂起。）
+    #[test]
+    fn peer_close_propagates_to_client() {
+        let server = start_server(0).expect("start server");
+        let port = server_port(server).expect("server port");
+        let client = connect("127.0.0.1", port).expect("connect");
+        wait_state(client, STATE_CONNECTED);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let accepted = loop {
+            let a = accept_connections(server);
+            if !a.is_empty() {
+                break a;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timeout waiting for server accept"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let server_conn = accepted[0];
+
+        // 服务端主动关闭 → 客户端应在超时内感知（CLOSED 或 UNKNOWN）。
+        assert!(close_connection(server_conn));
+        wait_disconnected(client);
+
+        close_connection(client);
+        stop_server(server);
+    }
+
     #[tokio::test]
     async fn plaintext_bidi_echo() {
         use quinn::Endpoint;
@@ -308,6 +359,6 @@ mod tests {
 
         assert_eq!(response, request, "echo mismatch");
         conn.close(0u32.into(), b"done");
-        server_task.await;
+        server_task.await.unwrap();
     }
 }

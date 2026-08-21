@@ -43,14 +43,7 @@ public final class QuicServerTransport {
         group.register(channel).syncUninterruptibly();
         // 纳入 ServerConnectionListener 的 tick 列表（getConnections 返回内部可变列表）。
         server.getConnection().getConnections().add(connection);
-        QuicServerTransportLog.log(connId, channel.connId());
-    }
-
-    /** 独立小日志类，避免直接依赖 mod 主类（两副本保持一致）。 */
-    private static final class QuicServerTransportLog {
-        static void log(long connId, long channelId) {
-            top.tangge233.qmc.server.QuicServer.LOGGER.info(
-                    "QUIC connection " + connId + " adopted into server pipeline (channel " + channelId + ")");
-        }
+        top.tangge233.qmc.server.QuicServer.LOGGER.info(
+                "QUIC connection " + connId + " adopted into server pipeline (channel " + channel.connId() + ")");
     }
 }
