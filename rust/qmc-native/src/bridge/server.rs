@@ -8,18 +8,35 @@ use super::registry::{allocate_id, registry, runtime};
 use super::{Command, ConnHandle, STATE_CONNECTED, STATE_FAILED, ServerHandle};
 
 /// 启动服务端 QUIC acceptor（端口 0 表示由系统分配）。
+///
+/// 优先绑定 IPv6 双栈 `[::]:port`（IPV6_V6ONLY=false，同时接受 IPv4
+/// v4-mapped 连接）；系统禁用双栈时回退 IPv4 `0.0.0.0:port`。
 pub fn start_server(port: u16) -> Result<u64, String> {
     let rt = runtime();
     let server_config = quinn_plaintext::server_config();
-    let endpoint = {
+    let (endpoint, actual_port) = {
         let _guard = rt.enter();
-        quinn::Endpoint::server(server_config, ([0, 0, 0, 0], port).into())
-            .map_err(|e| format!("bind udp/{port}: {e}"))?
+        // 优先 IPv6 双栈（接受 v4-mapped 连接）；失败回退 IPv4-only。
+        let v6_addr: std::net::SocketAddr = format!("[::]:{port}").parse().unwrap();
+        match quinn::Endpoint::server(server_config.clone(), v6_addr) {
+            Ok(ep) => {
+                let p = ep
+                    .local_addr()
+                    .map_err(|e| format!("local addr: {e}"))?
+                    .port();
+                (ep, p)
+            }
+            Err(v6_err) => {
+                let ep = quinn::Endpoint::server(server_config, ([0, 0, 0, 0], port).into())
+                    .map_err(|e| format!("bind udp/{port}: v6: {v6_err}; v4: {e}"))?;
+                let p = ep
+                    .local_addr()
+                    .map_err(|e| format!("local addr: {e}"))?
+                    .port();
+                (ep, p)
+            }
+        }
     };
-    let actual_port = endpoint
-        .local_addr()
-        .map_err(|e| format!("local addr: {e}"))?
-        .port();
 
     let server_id = {
         let mut reg = registry().lock().unwrap();

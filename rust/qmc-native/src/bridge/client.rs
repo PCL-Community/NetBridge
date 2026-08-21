@@ -51,7 +51,6 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
         id
     };
 
-    let host_owned = host.to_string();
     rt.spawn(async move {
         let conn = match endpoint.connect(addr, "plaintext.test") {
             Ok(connecting) => match connecting.await {
