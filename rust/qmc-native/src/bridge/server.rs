@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use super::connection::run_connection;
-use super::registry::{allocate_id, registry, runtime};
+use super::registry::{allocate_id, lock_registry, runtime};
 use super::{Command, ConnHandle, STATE_CONNECTED, STATE_FAILED, ServerHandle};
 
 /// 启动服务端 QUIC acceptor（端口 0 表示由系统分配）。
@@ -38,7 +38,7 @@ pub fn start_server(port: u16) -> Result<u64, String> {
     };
 
     let server_id = {
-        let mut reg = registry().lock().unwrap();
+        let mut reg = lock_registry();
         let id = allocate_id(&mut reg);
         reg.servers.insert(
             id,
@@ -77,7 +77,7 @@ pub fn start_server(port: u16) -> Result<u64, String> {
                         }
                         Err(_) => {
                             reg.state.store(STATE_FAILED, Ordering::SeqCst);
-                            registry().lock().unwrap().conns.remove(&reg.conn_id);
+                            lock_registry().conns.remove(&reg.conn_id);
                         }
                     }
                 }
@@ -89,9 +89,7 @@ pub fn start_server(port: u16) -> Result<u64, String> {
 
 /// 查询服务端实际绑定端口。
 pub fn server_port(server: u64) -> Option<u16> {
-    registry()
-        .lock()
-        .unwrap()
+    lock_registry()
         .servers
         .get(&server)
         .map(|h| h.port)
@@ -99,7 +97,7 @@ pub fn server_port(server: u64) -> Option<u16> {
 
 /// 停止服务端并关闭其全部连接。
 pub fn stop_server(server: u64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_registry();
     let Some(handle) = reg.servers.remove(&server) else {
         return false;
     };
@@ -121,7 +119,7 @@ pub fn stop_server(server: u64) -> bool {
 
 /// 取回服务端尚未上报的新连接 id 列表。
 pub fn accept_connections(server: u64) -> Vec<u64> {
-    let reg = registry().lock().unwrap();
+    let reg = lock_registry();
     let mut out = Vec::new();
     for (id, handle) in reg.conns.iter() {
         if handle.server_id == Some(server) && !handle.reported.swap(true, Ordering::SeqCst) {
@@ -145,7 +143,7 @@ fn register_connection(server_id: u64) -> Registered {
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8192);
     let state = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(STATE_CONNECTED));
     let conn_id = {
-        let mut reg = registry().lock().unwrap();
+        let mut reg = lock_registry();
         let id = allocate_id(&mut reg);
         reg.conns.insert(
             id,

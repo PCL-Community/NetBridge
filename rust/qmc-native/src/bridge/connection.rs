@@ -3,13 +3,11 @@
 use std::sync::atomic::Ordering;
 
 use super::Command;
-use super::registry::registry;
+use super::registry::lock_registry;
 
 /// 查询连接状态；不存在返回 None（Java 映射为 UNKNOWN）。
 pub fn connection_state(conn: u64) -> Option<u32> {
-    registry()
-        .lock()
-        .unwrap()
+    lock_registry()
         .conns
         .get(&conn)
         .map(|h| h.state.load(Ordering::SeqCst))
@@ -17,7 +15,7 @@ pub fn connection_state(conn: u64) -> Option<u32> {
 
 /// 关闭连接（优雅结束发送侧，等待 QUIC 任务收尾）。
 pub fn close_connection(conn: u64) -> bool {
-    let mut reg = registry().lock().unwrap();
+    let mut reg = lock_registry();
     let Some(handle) = reg.conns.get(&conn) else {
         return false;
     };
@@ -39,7 +37,7 @@ pub fn write_chunk(conn: u64, data: &[u8]) -> Result<usize, String> {
     if data.is_empty() {
         return Ok(0);
     }
-    let reg = registry().lock().unwrap();
+    let reg = lock_registry();
     let handle = reg
         .conns
         .get(&conn)
@@ -56,12 +54,16 @@ pub fn write_chunk(conn: u64, data: &[u8]) -> Result<usize, String> {
 
 /// 读取最多 max_bytes 字节；无数据时返回空 Vec。
 pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
-    let reg = registry().lock().unwrap();
+    let reg = lock_registry();
     let handle = reg
         .conns
         .get(&conn)
         .ok_or_else(|| "no such connection".to_string())?;
-    let mut guard = handle.to_java.lock().unwrap();
+    // 与注册表同理：读队列无不变量，中毒后接管继续，避免 JNI 边界 abort。
+    let mut guard = match handle.to_java.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let (rx, pending) = &mut *guard;
 
     let mut out = Vec::new();
@@ -156,5 +158,5 @@ pub async fn run_connection(
     reader.abort();
     let _ = reader.await;
     conn.close(0u32.into(), b"qmc close");
-    registry().lock().unwrap().conns.remove(&conn_id);
+    lock_registry().conns.remove(&conn_id);
 }

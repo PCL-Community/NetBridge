@@ -32,6 +32,18 @@ pub fn registry() -> &'static Mutex<Registry> {
     })
 }
 
+/// 毒锁容忍的注册表访问。
+///
+/// 注册表不含需要回滚的不变量，持锁线程 panic 后直接接管数据继续运行；
+/// 否则后续 JNI 调用会因 unwrap 中毒锁反复 panic，从 `extern "system"`
+/// 边界 unwind 导致整个宿主进程（Minecraft）abort。
+pub fn lock_registry() -> std::sync::MutexGuard<'static, Registry> {
+    match registry().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub fn allocate_id(reg: &mut Registry) -> u64 {
     let id = reg.next_id;
     reg.next_id += 1;
@@ -40,9 +52,9 @@ pub fn allocate_id(reg: &mut Registry) -> u64 {
 
 /// 记录最近一次错误（JNI 侧读取并清空）。
 pub fn last_error() -> Option<String> {
-    registry().lock().unwrap().last_error.take()
+    lock_registry().last_error.take()
 }
 
 pub fn set_last_error(msg: String) {
-    registry().lock().unwrap().last_error = Some(msg);
+    lock_registry().last_error = Some(msg);
 }

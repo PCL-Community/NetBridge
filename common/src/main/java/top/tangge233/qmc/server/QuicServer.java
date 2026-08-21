@@ -1,5 +1,7 @@
 package top.tangge233.qmc.server;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.LongConsumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +20,17 @@ public final class QuicServer {
     private static volatile long serverHandle = -1;
     private static volatile int port = -1;
     private static volatile LongConsumer connectionHandler;
+
+    /**
+     * 连接收养执行器（单线程串行）：handler 内部的 channel 注册可能阻塞
+     * （等待服务端 EventLoop），移出 accept 线程避免拖慢全部新连接的
+     * 接纳；单线程同时保证收养顺序与连接到达顺序一致。daemon 随 JVM 退出。
+     */
+    private static final ExecutorService ADOPT_EXECUTOR = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "qmc-quic-adopt");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     private QuicServer() {}
 
@@ -65,12 +78,14 @@ public final class QuicServer {
                     LongConsumer handler = connectionHandler;
                     for (long id : ids) {
                         if (handler != null) {
-                            try {
-                                handler.accept(id);
-                            } catch (Throwable t) {
-                                LOGGER.warn("QUIC connection handler failed for conn {}", id, t);
-                                QuicNative.closeConnection(id);
-                            }
+                            ADOPT_EXECUTOR.execute(() -> {
+                                try {
+                                    handler.accept(id);
+                                } catch (Throwable t) {
+                                    LOGGER.warn("QUIC connection handler failed for conn {}", id, t);
+                                    QuicNative.closeConnection(id);
+                                }
+                            });
                         } else {
                             LOGGER.warn("QUIC connection {} rejected: no connection handler registered", id);
                             QuicNative.closeConnection(id);
