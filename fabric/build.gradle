@@ -28,6 +28,21 @@ dependencies {
     implementation "io.netty:netty-handler:4.1.97.Final"
 }
 
+// MC 运行时不提供 toml4j（gson 由 MC 提供）：独立配置只解析 toml4j 自身，
+// 随 mod jar 打包，避免触发整个 runtimeClasspath 的解析。
+configurations {
+    toml4jBundle {
+        // gson 由 MC 运行时提供，不随 jar 打包。
+        transitive = false
+    }
+}
+
+dependencies {
+    toml4jBundle "com.moandjiezana.toml:toml4j:0.7.2"
+}
+
+def toml4jTrees = files(configurations.toml4jBundle.files.collect { zipTree(it) })
+
 processResources {
     inputs.property 'version', modVersion
     filesMatching('fabric.mod.json') {
@@ -41,4 +56,7 @@ tasks.named('jar') {
     dependsOn(rootProject.tasks.named('buildCdylib'))
     from(cdylibDir) { into 'native/' }
     from(project(':common').sourceSets.main.output)
+    from(toml4jTrees) {
+        exclude 'META-INF/**'
+    }
 }

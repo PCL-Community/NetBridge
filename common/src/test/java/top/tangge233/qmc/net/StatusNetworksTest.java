@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import org.junit.jupiter.api.Test;
 
+/** {@link StatusNetworks} 注入与解析行为测试（含 enable/port 边界）。 */
 class StatusNetworksTest {
     @Test
     void injectsNetworksAndKeepsOriginalFields() {
@@ -22,6 +23,19 @@ class StatusNetworksTest {
     @Test
     void missingNetworksGivesEmpty() {
         assertFalse(StatusNetworks.parse("{\"description\":{\"text\":\"x\"}}").supportsQuicRaw());
+    }
+
+    @Test
+    void explicitlyDisabledQuicGivesEmpty() {
+        String input = "{\"networks\":{\"quic\":{\"enable\":false,\"port\":25565,\"features\":[\"quic-raw\"],\"protocol\":\"quic-mc/1\"}}}";
+        assertFalse(StatusNetworks.parse(input).supportsQuicRaw());
+        assertTrue(StatusNetworks.parse(input).quicInfo().isEmpty());
+    }
+
+    @Test
+    void missingPortGivesEmpty() {
+        String input = "{\"networks\":{\"quic\":{\"enable\":true,\"features\":[\"quic-raw\"]}}}";
+        assertTrue(StatusNetworks.parse(input).quicInfo().isEmpty());
     }
 
     @Test

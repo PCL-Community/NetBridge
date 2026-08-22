@@ -17,6 +17,8 @@ dependencies {
     // SLF4J API：与 MC 自带的日志门面一致（运行时由 MC 提供 log4j 后端）。
     implementation "org.slf4j:slf4j-api:2.0.13"
     implementation "com.google.code.gson:gson:2.10.1"
+    // TOML 配置解析/写出：MC 运行时不提供，平台 jar 需显式打包（见各平台 jar 任务）。
+    api "com.moandjiezana.toml:toml4j:0.7.2"
     // 与 MC 1.21.1 内置 Netty 版本一致（QuicChannel 适配器用）。
     implementation "io.netty:netty-common:4.1.97.Final"
     implementation "io.netty:netty-buffer:4.1.97.Final"

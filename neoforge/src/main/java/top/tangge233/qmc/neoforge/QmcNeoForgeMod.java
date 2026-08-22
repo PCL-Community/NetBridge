@@ -14,6 +14,10 @@ import top.tangge233.qmc.net.QuicClient;
 import top.tangge233.qmc.neoforge.mc.QuicServerTransport;
 import top.tangge233.qmc.server.QuicServer;
 
+/**
+ * NeoForge 入口：加载原生库、注册客户端 TOML 配置文件，并在
+ * ServerStarted/ServerStopping 事件上启停 QUIC acceptor。
+ */
 @Mod(QmcNeoForgeMod.MOD_ID)
 public class QmcNeoForgeMod {
     public static final String MOD_ID = "qmc";
@@ -22,7 +26,7 @@ public class QmcNeoForgeMod {
     public QmcNeoForgeMod(IEventBus modBus) {
         NativeLoader.load();
         QuicClient.useConfigFile(
-                FMLPaths.CONFIGDIR.get().resolve("quic-mc/client.properties"));
+                FMLPaths.CONFIGDIR.get().resolve("quic-mc/client.toml"));
         LOGGER.info("quic-mc NeoForge loaded: native bridge {}, feature {}",
                 QuicNative.version(), QuicNative.rawFeature());
         NeoForge.EVENT_BUS.addListener((ServerStartedEvent e) -> {

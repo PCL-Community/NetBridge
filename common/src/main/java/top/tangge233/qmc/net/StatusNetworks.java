@@ -13,12 +13,13 @@ public final class StatusNetworks {
     private StatusNetworks() {}
 
     /**
-     * 给服务器列表 Ping 响应 JSON 注入 networks 能力声明。
+     * 给服务器列表 Ping 响应 JSON 注入 networks 能力声明，quic 表写入
+     * {@code enable/port/features/protocol} 四个字段。
      *
      * @param statusJson 原版 MinecraftServer#getStatusJson 输出
-     * @param quicPort   QUIC 端口（服务端 UDP acceptor 使用）
+     * @param quicPort   QUIC 端口（acceptor 实际绑定的 UDP 端口）
      * @param features   至少应包含 QuicNative.RAW_FEATURE
-     * @return 带 networks 的 JSON 字符串；若 statusJson 非有效对象则原样返回
+     * @return 注入后的 JSON；statusJson 非有效对象或已含 networks 时原样返回
      */
     public static String addNetworks(String statusJson, int quicPort, String... features) {
         Objects.requireNonNull(statusJson, "statusJson");
@@ -33,6 +34,7 @@ public final class StatusNetworks {
             return statusJson;
         }
         JsonObject quic = new JsonObject();
+        quic.addProperty(Networks.KEY_ENABLE, true);
         var featureArr = new com.google.gson.JsonArray();
         for (String f : features) {
             featureArr.add(f);
@@ -46,7 +48,12 @@ public final class StatusNetworks {
         return root.toString();
     }
 
-    /** 从 status JSON 中解析 networks 模型；缺失/无效时返回 empty。 */
+    /**
+     * 从 status JSON 解析 networks 模型（客户端解码侧使用）。
+     *
+     * @return 解析结果；JSON 缺失/损坏、缺 port 或 {@code enable} 显式为
+     *         false 时返回 empty，调用方应视同服务端不支持 QUIC。
+     */
     public static Networks parse(String statusJson) {
         try {
             JsonObject root = JsonParser.parseString(statusJson).getAsJsonObject();
@@ -58,6 +65,13 @@ public final class StatusNetworks {
                 return Networks.empty();
             }
             JsonObject quic = networks.getAsJsonObject(Networks.KEY_QUIC);
+            // enable 显式为 false：服务端声明 QUIC 不可用，等同未宣告。
+            if (quic.has(Networks.KEY_ENABLE) && !quic.get(Networks.KEY_ENABLE).getAsBoolean()) {
+                return Networks.empty();
+            }
+            if (!quic.has(Networks.KEY_PORT)) {
+                return Networks.empty();
+            }
             int port = quic.get(Networks.KEY_PORT).getAsInt();
             var featureArr = new java.util.ArrayList<String>();
             if (quic.has(Networks.KEY_FEATURES)) {

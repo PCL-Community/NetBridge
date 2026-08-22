@@ -76,15 +76,17 @@ class QuicClientTest {
     @Test
     void configFileRoundTrip(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
         // 加载：预置配置文件应生效（模拟上次退出时保存的模式）。
-        java.nio.file.Path file = dir.resolve("quic-mc/client.properties");
+        java.nio.file.Path file = dir.resolve("quic-mc/client.toml");
         Files.createDirectories(file.getParent());
-        Files.writeString(file, "mode=quic-fallback\n");
+        Files.writeString(file, "mode = \"quic-fallback\"\n");
         QuicClient.useConfigFile(file);
         assertEquals(TransportMode.QUIC_WITH_TCP_FALLBACK, QuicClient.mode());
 
-        // 保存：切换模式即写回，内容可被下次启动加载。
+        // 保存：切换模式即写回，内容可被下次启动加载（TOML 回读校验，不锁格式）。
         QuicClient.setMode(TransportMode.QUIC_ONLY);
-        assertEquals("mode=quic", Files.readString(file).trim());
+        assertEquals(
+                "quic",
+                new com.moandjiezana.toml.Toml().read(file.toFile()).getString("mode"));
     }
 
     private InetSocketAddress addr() {

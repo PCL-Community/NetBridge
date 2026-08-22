@@ -9,12 +9,14 @@ import top.tangge233.qmc.jni.QuicNative;
 /**
  * 服务器列表 Ping 响应中 quic-mc 的传输能力识别模型（ADR-0002）。
  *
- * 仅做最小可用的 JSON 无关数据模型；真实 JSON 序列化/反序列化将
- * 接入 Minecraft 的 Gson/Codec（1.21.1）。
+ * 数据模型与 wire 格式解耦：JSON 注入/解析见 {@link StatusNetworks}；
+ * 顶层 networks 表为未来 KCP 等其他传输预留平级扩展位。
  */
 public final class Networks {
     public static final String KEY_NETWORKS = "networks";
     public static final String KEY_QUIC = "quic";
+    /** 显式 {@code false} 表示服务端声明 QUIC 不可用，客户端应视同未宣告。 */
+    public static final String KEY_ENABLE = "enable";
     public static final String KEY_FEATURES = "features";
     public static final String KEY_PORT = "port";
     public static final String KEY_PROTOCOL = "protocol";

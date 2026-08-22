@@ -19,6 +19,21 @@ dependencies {
     implementation "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
 }
 
+// MC 运行时不提供 toml4j（gson 由 MC 提供）：独立配置只解析 toml4j 自身，
+// 随 mod jar 打包，避免触发整个 runtimeClasspath 的解析。
+configurations {
+    toml4jBundle {
+        // gson 由 MC 运行时提供，不随 jar 打包。
+        transitive = false
+    }
+}
+
+dependencies {
+    toml4jBundle "com.moandjiezana.toml:toml4j:0.7.2"
+}
+
+def toml4jTrees = files(configurations.toml4jBundle.files.collect { zipTree(it) })
+
 neoForge {
     version = neoForgeVersion
     validateAccessTransformers = true
@@ -37,4 +52,7 @@ tasks.register('jarNeoForge', Jar) {
     from(sourceSets.main.output)
     from(project(':common').sourceSets.main.output)
     from(cdylibDir) { into 'native/' }
+    from(toml4jTrees) {
+        exclude 'META-INF/**'
+    }
 }
