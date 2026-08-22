@@ -56,16 +56,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 守卫：tag 必须与 gradle.properties 的 modVersion 一致，否则资产名会错位。
-      - name: Verify tag matches modVersion
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          prop="$(grep -Po '^modVersion=\K.*' gradle.properties)"
-          if [ "$tag" != "$prop" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match modVersion=${prop}"
-            exit 1
-          fi
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -84,8 +74,10 @@ jobs:
           path: build/native
           merge-multiple: true
 
+      # 版本取自 tag（vX.Y.Z → X.Y.Z），命令行 -P 覆盖 gradle.properties 的 modVersion，
+      # jar 名与 fabric.mod.json 内嵌版本随 tag 走，无需手动同步。
       - name: Assemble mod jars
-        run: gradle build assembleAll -PnativeProfile=release -PskipNativeBuild
+        run: gradle build assembleAll -PnativeProfile=release -PskipNativeBuild "-PmodVersion=${GITHUB_REF_NAME#v}"
 
       - name: Upload mod jars
         uses: actions/upload-artifact@v4
