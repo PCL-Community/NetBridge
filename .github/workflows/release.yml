@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    name: native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: native-linux
+            lib: libqmc_native.so
+          - os: macos-latest
+            artifact: native-macos
+            lib: libqmc_native.dylib
+          - os: windows-latest
+            artifact: native-windows
+            lib: qmc_native.dll
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/qmc-native
+
+      - name: Build Rust cdylib
+        working-directory: rust/qmc-native
+        run: cargo build --release
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: rust/qmc-native/target/release/${{ matrix.lib }}
+          if-no-files-found: error
+
+  package:
+    name: Package mod jars (all platforms bundled)
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 守卫：tag 必须与 gradle.properties 的 modVersion 一致，否则资产名会错位。
+      - name: Verify tag matches modVersion
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          prop="$(grep -Po '^modVersion=\K.*' gradle.properties)"
+          if [ "$tag" != "$prop" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match modVersion=${prop}"
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.7.1'
+
+      # 三平台原生库合并到 build/native/，jar 打包时全部打入 native/ 路径，
+      # 运行时由 NativeLoader 按 OS 选择对应库。
+      - name: Download all native libraries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: build/native
+          merge-multiple: true
+
+      - name: Assemble mod jars
+        run: gradle build assembleAll -PnativeProfile=release -PskipNativeBuild
+
+      - name: Upload mod jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-jars
+          path: build/libs/*.jar
+          if-no-files-found: error
+
+  release:
+    name: Publish immutable release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download mod jars
+        uses: actions/download-artifact@v4
+        with:
+          name: mod-jars
+          path: dist
+
+      # 两步发布保证 immutable：先以 draft 状态上传全部资产（资产不可变、外部不可见），
+      # 再切 draft=false 正式发布。
+      - name: Create draft release and upload assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: dist/*.jar
+
+      - name: Publish release (draft -> published)
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false

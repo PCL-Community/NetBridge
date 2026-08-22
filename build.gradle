@@ -21,7 +21,15 @@ if (!(nativeProfile in ['debug', 'release'])) {
 def cargoDir = file('rust/qmc-native')
 def cdylibDir = file("$buildDir/native")
 
+// 按当前 OS 选择 cargo 产出的 cdylib 文件名（与 NativeLoader.nativeResourceName() 一致）。
+def osName = System.getProperty('os.name', '').toLowerCase()
+def cdylibName = osName.contains('win') ? 'qmc_native.dll'
+        : (osName.contains('mac') || osName.contains('darwin')) ? 'libqmc_native.dylib'
+        : 'libqmc_native.so'
+
 tasks.register('buildCdylib') {
+    // CI 预置三平台库到 build/native 后可用 -PskipNativeBuild 跳过本机 cargo 构建。
+    onlyIf { !project.hasProperty('skipNativeBuild') }
     doLast {
         cdylibDir.mkdirs()
         def cargoArgs = ['cargo', 'build']
@@ -36,7 +44,7 @@ tasks.register('buildCdylib') {
         if (code != 0) {
             throw new GradleException("cargo build failed with exit code " + code)
         }
-        def src = file("rust/qmc-native/target/${nativeProfile}/libqmc_native.so")
+        def src = file("rust/qmc-native/target/${nativeProfile}/${cdylibName}")
         if (!src.exists()) {
             throw new GradleException("Rust cdylib not found after cargo build: ${src}")
         }
