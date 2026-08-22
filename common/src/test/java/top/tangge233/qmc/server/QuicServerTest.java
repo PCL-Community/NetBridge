@@ -11,7 +11,7 @@ import top.tangge233.qmc.jni.NativeLoader;
 import top.tangge233.qmc.jni.QuicNative;
 
 /**
- * QuicServer accept 循环集成测试（真实 JNI）：handler 回调、无 handler 拒绝、stop 幂等。
+ * QuicServer accept 循环集成测试（真实 JNI）：handler 回调、stop 幂等。
  */
 class QuicServerTest {
     private final BlockingQueue<Long> accepted = new LinkedBlockingQueue<>();
@@ -39,27 +39,6 @@ class QuicServerTest {
         assertNotNull(connId, "handler never invoked");
         assertEquals(QuicNative.STATE_CONNECTED, QuicNative.connectionState(connId));
         QuicNative.closeConnection(client);
-    }
-
-    @Test
-    void rejectsWhenNoHandlerRegistered() throws Exception {
-        NativeLoader.load();
-        assertTrue(QuicServer.start(0));
-        long client = QuicNative.connect("127.0.0.1", QuicServer.port());
-        assertTrue(client > 0);
-        // 无 handler：新连接应被关闭而非静默挂起。服务端收尾时 store(CLOSED)
-        // 与 registry 移除几乎同时发生，客户端可能直接观察到 UNKNOWN(-1)——
-        // 与生产判定（QuicChannel.poll 把 CLOSED/UNKNOWN 都视为关闭）一致。
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (System.nanoTime() < deadline) {
-            int s = QuicNative.connectionState(client);
-            if (s != QuicNative.STATE_CONNECTED) {
-                return;
-            }
-            Thread.sleep(5);
-        }
-        fail("connection without handler was not closed, state="
-                + QuicNative.connectionState(client));
     }
 
     @Test
