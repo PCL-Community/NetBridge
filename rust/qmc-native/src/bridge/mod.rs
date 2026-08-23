@@ -33,7 +33,8 @@ use tokio::sync::mpsc;
 pub struct ConnHandle {
     pub state: Arc<AtomicU32>,
     /// Java 读侧队列 + 未取走的残留字节（防 chunk 被截断丢弃）。
-    pub to_java: Mutex<(mpsc::Receiver<Vec<u8>>, Vec<u8>)>,
+    /// Arc 化：读路径克隆后即可释放 DashMap guard。
+    pub to_java: Arc<Mutex<(mpsc::Receiver<Vec<u8>>, Vec<u8>)>>,
     pub to_quic: mpsc::Sender<Command>,
     pub server_id: Option<u64>,
     /// 服务端连接是否已被 Java 通过 acceptConnections 取走。

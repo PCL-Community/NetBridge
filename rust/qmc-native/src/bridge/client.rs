@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use super::connection::run_connection;
-use super::registry::{allocate_id, lock_registry, runtime};
+use super::registry::{allocate_id, conns, runtime};
 use super::{ConnHandle, STATE_CONNECTING};
 
 /// 客户端发起 QUIC 连接（异步握手，立即返回连接 id）。
@@ -21,21 +21,17 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
     let (to_quic_tx, to_quic_rx) = mpsc::channel::<super::Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Vec<u8>>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let conn_id = {
-        let mut reg = lock_registry();
-        let id = allocate_id(&mut reg);
-        reg.conns.insert(
-            id,
-            ConnHandle {
-                state: state.clone(),
-                to_java: Mutex::new((to_java_rx, Vec::new())),
-                to_quic: to_quic_tx.clone(),
-                server_id: None,
-                reported: std::sync::atomic::AtomicBool::new(true),
-            },
-        );
-        id
-    };
+    let conn_id = allocate_id();
+    conns().insert(
+        conn_id,
+        ConnHandle {
+            state: state.clone(),
+            to_java: Arc::new(Mutex::new((to_java_rx, Vec::new()))),
+            to_quic: to_quic_tx.clone(),
+            server_id: None,
+            reported: std::sync::atomic::AtomicBool::new(true),
+        },
+    );
 
     let host = host.to_string();
     rt.spawn(async move {

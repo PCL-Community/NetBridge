@@ -3,28 +3,29 @@
 use std::sync::atomic::Ordering;
 
 use super::Command;
-use super::registry::lock_registry;
+use super::registry::conns;
 
 /// 查询连接状态；不存在返回 None（Java 映射为 UNKNOWN）。
 pub fn connection_state(conn: u64) -> Option<u32> {
-    lock_registry()
-        .conns
+    conns()
         .get(&conn)
         .map(|h| h.state.load(Ordering::SeqCst))
 }
 
 /// 关闭连接（优雅结束发送侧，等待 QUIC 任务收尾）。
 pub fn close_connection(conn: u64) -> bool {
-    let mut reg = lock_registry();
-    let Some(handle) = reg.conns.get(&conn) else {
+    let Some(handle) = conns().get(&conn) else {
         return false;
     };
-    let was = handle.state.swap(super::STATE_CLOSED, Ordering::SeqCst);
-    let ok = handle.to_quic.try_send(Command::Close).is_ok();
+    let state = handle.state.clone();
+    let to_quic = handle.to_quic.clone();
+    drop(handle);
+    let was = state.swap(super::STATE_CLOSED, Ordering::SeqCst);
+    let ok = to_quic.try_send(Command::Close).is_ok();
     // FAILED 且无存活任务收尾的连接（如客户端握手失败）：由 close 兜底
     // 移除注册表条目，否则泄漏；有任务时其收尾 remove 为幂等 no-op。
     if was == super::STATE_FAILED {
-        reg.conns.remove(&conn);
+        conns().remove(&conn);
     }
     ok
 }
@@ -37,15 +38,16 @@ pub fn write_chunk(conn: u64, data: &[u8]) -> Result<usize, String> {
     if data.is_empty() {
         return Ok(0);
     }
-    let reg = lock_registry();
-    let handle = reg
-        .conns
-        .get(&conn)
-        .ok_or_else(|| "no such connection".to_string())?;
-    if handle.state.load(Ordering::SeqCst) != super::STATE_CONNECTED {
+    let Some(handle) = conns().get(&conn) else {
+        return Err("no such connection".to_string());
+    };
+    let connected = handle.state.load(Ordering::SeqCst) == super::STATE_CONNECTED;
+    let to_quic = handle.to_quic.clone();
+    drop(handle);
+    if !connected {
         return Ok(0);
     }
-    match handle.to_quic.try_send(Command::Write(data.to_vec())) {
+    match to_quic.try_send(Command::Write(data.to_vec())) {
         Ok(()) => Ok(data.len()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(0),
         Err(_) => Err("connection closed".to_string()),
@@ -54,13 +56,13 @@ pub fn write_chunk(conn: u64, data: &[u8]) -> Result<usize, String> {
 
 /// 读取最多 max_bytes 字节；无数据时返回空 Vec。
 pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
-    let reg = lock_registry();
-    let handle = reg
-        .conns
-        .get(&conn)
-        .ok_or_else(|| "no such connection".to_string())?;
-    // 与注册表同理：读队列无不变量，中毒后接管继续，避免 JNI 边界 abort。
-    let mut guard = match handle.to_java.lock() {
+    let Some(handle) = conns().get(&conn) else {
+        return Err("no such connection".to_string());
+    };
+    let to_java = handle.to_java.clone();
+    drop(handle);
+    // 队列锁无不变量，中毒后接管继续，避免 JNI 边界 abort。
+    let mut guard = match to_java.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -158,5 +160,5 @@ pub async fn run_connection(
     reader.abort();
     let _ = reader.await;
     conn.close(0u32.into(), b"qmc close");
-    lock_registry().conns.remove(&conn_id);
+    conns().remove(&conn_id);
 }

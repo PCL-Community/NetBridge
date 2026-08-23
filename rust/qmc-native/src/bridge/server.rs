@@ -1,9 +1,10 @@
 //! 服务端 QUIC acceptor：endpoint 生命周期与连接 accept。
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::connection::run_connection;
-use super::registry::{allocate_id, lock_registry, runtime};
+use super::registry::{allocate_id, conns, runtime, servers};
 use super::{Command, ConnHandle, STATE_CONNECTED, STATE_FAILED, ServerHandle};
 
 /// 启动服务端 QUIC acceptor（端口 0 表示由系统分配）。
@@ -37,18 +38,14 @@ pub fn start_server(port: u16) -> Result<u64, String> {
         }
     };
 
-    let server_id = {
-        let mut reg = lock_registry();
-        let id = allocate_id(&mut reg);
-        reg.servers.insert(
-            id,
-            ServerHandle {
-                endpoint: endpoint.clone(),
-                port: actual_port,
-            },
-        );
-        id
-    };
+    let server_id = allocate_id();
+    servers().insert(
+        server_id,
+        ServerHandle {
+            endpoint: endpoint.clone(),
+            port: actual_port,
+        },
+    );
 
     let accept_endpoint = endpoint.clone();
     rt.spawn(async move {
@@ -77,7 +74,7 @@ pub fn start_server(port: u16) -> Result<u64, String> {
                         }
                         Err(_) => {
                             reg.state.store(STATE_FAILED, Ordering::SeqCst);
-                            lock_registry().conns.remove(&reg.conn_id);
+                            conns().remove(&reg.conn_id);
                         }
                     }
                 }
@@ -89,27 +86,23 @@ pub fn start_server(port: u16) -> Result<u64, String> {
 
 /// 查询服务端实际绑定端口。
 pub fn server_port(server: u64) -> Option<u16> {
-    lock_registry()
-        .servers
-        .get(&server)
-        .map(|h| h.port)
+    servers().get(&server).map(|h| h.port)
 }
 
 /// 停止服务端并关闭其全部连接。
 pub fn stop_server(server: u64) -> bool {
-    let mut reg = lock_registry();
-    let Some(handle) = reg.servers.remove(&server) else {
+    let Some((_, handle)) = servers().remove(&server) else {
         return false;
     };
     handle.endpoint.close(0u32.into(), b"qmc stop");
-    let conn_ids: Vec<u64> = reg
-        .conns
+    // 先收集后修改：不在 DashMap 迭代期间变更同一 map。
+    let conn_ids: Vec<u64> = conns()
         .iter()
-        .filter(|(_, h)| h.server_id == Some(server))
-        .map(|(id, _)| *id)
+        .filter(|e| e.value().server_id == Some(server))
+        .map(|e| *e.key())
         .collect();
     for id in conn_ids {
-        if let Some(h) = reg.conns.get(&id) {
+        if let Some(h) = conns().get_mut(&id) {
             h.state.store(super::STATE_CLOSED, Ordering::SeqCst);
             let _ = h.to_quic.try_send(Command::Close);
         }
@@ -119,11 +112,10 @@ pub fn stop_server(server: u64) -> bool {
 
 /// 取回服务端尚未上报的新连接 id 列表。
 pub fn accept_connections(server: u64) -> Vec<u64> {
-    let reg = lock_registry();
     let mut out = Vec::new();
-    for (id, handle) in reg.conns.iter() {
-        if handle.server_id == Some(server) && !handle.reported.swap(true, Ordering::SeqCst) {
-            out.push(*id);
+    for e in conns().iter_mut() {
+        if e.server_id == Some(server) && !e.reported.swap(true, Ordering::SeqCst) {
+            out.push(*e.key());
         }
     }
     out
@@ -142,21 +134,17 @@ fn register_connection(server_id: u64) -> Registered {
     let (to_quic_tx, to_quic_rx) = tokio::sync::mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8192);
     let state = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(STATE_CONNECTED));
-    let conn_id = {
-        let mut reg = lock_registry();
-        let id = allocate_id(&mut reg);
-        reg.conns.insert(
-            id,
-            ConnHandle {
-                state: state.clone(),
-                to_java: std::sync::Mutex::new((to_java_rx, Vec::new())),
-                to_quic: to_quic_tx.clone(),
-                server_id: Some(server_id),
-                reported: std::sync::atomic::AtomicBool::new(false),
-            },
-        );
-        id
-    };
+    let conn_id = allocate_id();
+    conns().insert(
+        conn_id,
+        ConnHandle {
+            state: state.clone(),
+            to_java: Arc::new(std::sync::Mutex::new((to_java_rx, Vec::new()))),
+            to_quic: to_quic_tx.clone(),
+            server_id: Some(server_id),
+            reported: std::sync::atomic::AtomicBool::new(false),
+        },
+    );
     Registered {
         conn_id,
         to_quic_rx,

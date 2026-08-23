@@ -10,11 +10,17 @@ crate-type = ["cdylib", "lib"]
 path = "src/lib.rs"
 
 [dependencies]
+# Runtime
 jni = "0.21"
+tokio = { version = "1", features = ["full"] }
+
+# Record
+dashmap = "6"
+
+# Connection
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-proto = "0.11"
 quinn-plaintext = "0.3"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros"] }
 
 [profile.release]
 opt-level = 3
