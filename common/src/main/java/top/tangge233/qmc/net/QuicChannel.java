@@ -1,6 +1,7 @@
 package top.tangge233.qmc.net;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelMetadata;
@@ -37,9 +38,23 @@ public class QuicChannel extends AbstractChannel {
 
     private static final ChannelMetadata METADATA = new ChannelMetadata(false, 16);
     private static final long POLL_INTERVAL_MS = 5;
+    /** 单次 poll 的读取轮数上限：剩余数据留在原生队列下轮再取，防止持续灌流的远端独占 EventLoop。 */
+    private static final int MAX_READS_PER_POLL = 16;
+    /** 出站暂存区增长上限：更大的包（罕见）按需一次性精确分配，不常驻。 */
+    private static final int MAX_SCRATCH_BYTES = 1024 * 1024;
+
+    // 地址常量：InetSocketAddress 不可变，全通道共享（GC 零分配）。
+    private static final InetSocketAddress ADOPT_REMOTE_ADDRESS = new InetSocketAddress("0.0.0.0", 0);
+    private static final InetSocketAddress LOCAL_ADDRESS = new InetSocketAddress(0);
 
     private final ChannelConfig config = new DefaultChannelConfig(this);
     private final AtomicBoolean closed = new AtomicBoolean();
+    /**
+     * 出站写暂存区：JNI 边界必须连续 byte[]（安全值拷贝），这里按
+     * EventLoop 单线程独占复用同一数组，消除每消息的堆分配；倍增扩容，
+     * 超过 {@link #MAX_SCRATCH_BYTES} 的大包改用一次性精确分配。
+     */
+    private byte[] writeScratch;
 
     private volatile long connId = -1;
     private volatile boolean connected;
@@ -47,6 +62,12 @@ public class QuicChannel extends AbstractChannel {
     private volatile InetSocketAddress remoteAddress;
     private volatile ScheduledFuture<?> pollTask;
     private volatile ChannelPromise connectPromise;
+    /** flush 重试任务：无状态，单实例随通道复用。 */
+    private final Runnable flushRetryTask = () -> {
+        if (isOpen() && connected) {
+            unsafe().flush();
+        }
+    };
 
     public QuicChannel() {
         super(null);
@@ -64,7 +85,7 @@ public class QuicChannel extends AbstractChannel {
         QuicChannel channel = new QuicChannel();
         channel.connId = connId;
         channel.connected = true;
-        channel.remoteAddress = new InetSocketAddress("0.0.0.0", 0);
+        channel.remoteAddress = ADOPT_REMOTE_ADDRESS;
         return channel;
     }
 
@@ -80,7 +101,7 @@ public class QuicChannel extends AbstractChannel {
 
     @Override
     protected SocketAddress localAddress0() {
-        return new InetSocketAddress(0);
+        return LOCAL_ADDRESS;
     }
 
     @Override
@@ -144,9 +165,22 @@ public class QuicChannel extends AbstractChannel {
                 in.remove();
                 continue;
             }
-            byte[] data = new byte[readable];
-            buf.getBytes(buf.readerIndex(), data);
-            int accepted = QuicNative.writeChunk(connId, data);
+            // JNI 边界说明：Rust 侧不直接操作 JVM 内存（安全边界，ADR-0001），
+            // 出站必须拷进连续 byte[]。GC 优化：复用 EventLoop 独占的
+            // writeScratch（倍增扩容），仅超大包一次性精确分配。
+            byte[] data;
+            if (readable <= MAX_SCRATCH_BYTES) {
+                if (writeScratch == null) {
+                    writeScratch = new byte[Math.max(4096, readable)];
+                } else if (writeScratch.length < readable) {
+                    writeScratch = new byte[Math.max(readable, writeScratch.length << 1)];
+                }
+                data = writeScratch;
+            } else {
+                data = new byte[readable];
+            }
+            buf.getBytes(buf.readerIndex(), data, 0, readable);
+            int accepted = QuicNative.writeChunk(connId, data, readable);
             if (accepted < 0) {
                 in.remove(new IOException("quic write failed (conn " + connId + ", see qmc-native log)"));
                 // 统一经 close() 触发 channelInactive（此刻 connected 仍为 true，
@@ -204,45 +238,29 @@ public class QuicChannel extends AbstractChannel {
     }
 
     private void scheduleFlushRetry() {
-        eventLoop().schedule(() -> {
-            if (isOpen() && connected) {
-                unsafe().flush();
-            }
-        }, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        eventLoop().schedule(flushRetryTask, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     /** 事件循环上驱动：读取可用数据 + 重试 pending 写。 */
-    private void poll(ChannelPromise promise) {
+    private void poll() {
         if (connId < 0) {
             return;
         }
         int state = QuicNative.connectionState(connId);
         if (state == QuicNative.STATE_CONNECTED) {
             if (!connected) {
-                connected = true;
-                ChannelPromise p = this.connectPromise;
-                if (p != null && !p.isDone()) {
-                    p.trySuccess();
-                }
-                pipeline().fireChannelActive();
-                // 连接前排队等待的写（如握手包）现在可以发出。
-                unsafe().flush();
+                completeConnect();
             }
         } else if (state == QuicNative.STATE_FAILED) {
             stopPoller();
-            ChannelPromise p = this.connectPromise;
-            if (p != null && !p.isDone()) {
-                p.tryFailure(new ConnectException("quic handshake failed (conn " + connId + ", see qmc-native log)"));
-            }
+            failConnect(new ConnectException(
+                    "quic handshake failed (conn " + connId + ", see qmc-native log)"));
             pipeline().fireExceptionCaught(new IOException("quic connection failed"));
             unsafe().close(voidPromise());
             return;
         } else if (state == QuicNative.STATE_CLOSED || state == QuicNative.STATE_UNKNOWN) {
             stopPoller();
-            ChannelPromise p = this.connectPromise;
-            if (p != null && !p.isDone()) {
-                p.tryFailure(new ClosedChannelException());
-            }
+            failConnect(new ClosedChannelException());
             // 不手动 fireChannelInactive：connected 仍为 true，close() 会恰好触发一次。
             unsafe().close(voidPromise());
             return;
@@ -259,13 +277,33 @@ public class QuicChannel extends AbstractChannel {
         }
     }
 
+    /** 握手成功收尾：完成 connect promise、激活管线、放行连接前排队的写。 */
+    private void completeConnect() {
+        connected = true;
+        ChannelPromise p = connectPromise;
+        if (p != null && !p.isDone()) {
+            p.trySuccess();
+        }
+        pipeline().fireChannelActive();
+        // 连接前排队等待的写（如握手包）现在可以发出。
+        unsafe().flush();
+    }
+
+    /** 握手失败/关闭收尾：以给定原因完成（或失败）connect promise。 */
+    private void failConnect(Exception cause) {
+        ChannelPromise p = connectPromise;
+        if (p != null && !p.isDone()) {
+            p.tryFailure(cause);
+        }
+    }
+
     /** 读取当前全部可用字节并推入管道。 */
     private void readNow() {
         if (connId < 0 || !connected) {
             return;
         }
         boolean any = false;
-        while (true) {
+        for (int reads = 0; reads < MAX_READS_PER_POLL; reads++) {
             byte[] data = QuicNative.readChunk(connId, MAX_READ_BYTES);
             if (data == null) {
                 pipeline().fireExceptionCaught(new IOException("quic read failed (conn " + connId + ", see qmc-native log)"));
@@ -274,9 +312,10 @@ public class QuicChannel extends AbstractChannel {
             if (data.length == 0) {
                 break;
             }
-            ByteBuf buf = alloc().buffer(data.length, data.length);
-            buf.writeBytes(data);
-            pipeline().fireChannelRead(buf);
+            // data 为 JNI 每次调用新分配的独占数组：零拷贝包装直接移交，
+            // 省去池化 buffer checkout 与一次 memcpy；下游 release 后
+            // 包装对象与数组一并回收。
+            pipeline().fireChannelRead(Unpooled.wrappedBuffer(data));
             any = true;
             if (data.length < MAX_READ_BYTES) {
                 break;
@@ -289,7 +328,7 @@ public class QuicChannel extends AbstractChannel {
 
     private void startPoller(ChannelPromise promise) {
         this.connectPromise = promise;
-        pollTask = eventLoop().scheduleAtFixedRate(() -> poll(promise), 0, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        pollTask = eventLoop().scheduleAtFixedRate(this::poll, 0, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     private void stopPoller() {
@@ -301,10 +340,6 @@ public class QuicChannel extends AbstractChannel {
     }
 
     private final class QuicUnsafe extends AbstractUnsafe {
-        QuicUnsafe() {
-            super();
-        }
-
         @Override
         public void connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
             if (!promise.setUncancellable()) {

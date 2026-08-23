@@ -30,14 +30,11 @@ public abstract class JoinMultiplayerScreenMixin extends Screen {
 
     @Inject(method = "init", at = @At("RETURN"))
     private void qmc$addTransportButton(CallbackInfo ci) {
-        CycleButton<TransportMode> button = CycleButton.builder((TransportMode mode) -> {
-                    Component label = switch (mode) {
-                        case TCP_ONLY -> Component.literal("传输: TCP");
-                        case QUIC_ONLY -> Component.literal("传输: QUIC").withStyle(ChatFormatting.AQUA);
-                        case QUIC_WITH_TCP_FALLBACK ->
-                                Component.literal("传输: QUIC+回退").withStyle(ChatFormatting.AQUA);
-                    };
-                    return label;
+        CycleButton<TransportMode> button = CycleButton.builder((TransportMode mode) -> switch (mode) {
+                    case TCP_ONLY -> Component.literal("传输: TCP");
+                    case QUIC_ONLY -> Component.literal("传输: QUIC").withStyle(ChatFormatting.AQUA);
+                    case QUIC_WITH_TCP_FALLBACK ->
+                            Component.literal("传输: QUIC+回退").withStyle(ChatFormatting.AQUA);
                 })
                 .withValues(TransportMode.values())
                 .withInitialValue(QuicClient.mode())

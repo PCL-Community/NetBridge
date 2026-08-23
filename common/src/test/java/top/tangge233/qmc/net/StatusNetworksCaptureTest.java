@@ -11,24 +11,24 @@ import org.junit.jupiter.api.Test;
 class StatusNetworksCaptureTest {
     @Test
     void sameThreadCaptureThenTake() {
-        Networks n = Networks.withQuic(25565, "quic-raw");
+        NetworksAbility n = NetworksAbility.withQuic(25565, "quic-raw");
         StatusNetworksCapture.capture(n);
         assertSame(n, StatusNetworksCapture.take());
-        // 取走后清空（Networks 无值 equals，用行为断言）。
+        // 取走后清空（NetworksAbility 无值 equals，用行为断言）。
         assertTrue(StatusNetworksCapture.take().quicInfo().isEmpty());
     }
 
     @Test
     void emptyCaptureIsInvisible() {
-        StatusNetworksCapture.capture(Networks.empty());
+        StatusNetworksCapture.capture(NetworksAbility.empty());
         assertTrue(StatusNetworksCapture.take().quicInfo().isEmpty());
     }
 
     @Test
     void notVisibleAcrossThreads() throws Exception {
-        Networks n = Networks.withQuic(25565, "quic-raw");
+        NetworksAbility n = NetworksAbility.withQuic(25565, "quic-raw");
         StatusNetworksCapture.capture(n);
-        AtomicReference<Networks> seen = new AtomicReference<>();
+        AtomicReference<NetworksAbility> seen = new AtomicReference<>();
         Thread other = new Thread(() -> seen.set(StatusNetworksCapture.take()));
         other.start();
         other.join();

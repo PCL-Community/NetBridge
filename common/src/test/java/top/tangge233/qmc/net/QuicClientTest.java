@@ -40,7 +40,7 @@ class QuicClientTest {
         // 未 Ping 过：无能力 -> 不走 QUIC
         assertNull(QuicClient.quicTargetFor(addr));
 
-        QuicClient.record(addr, Networks.withQuic(25565, QuicNative.RAW_FEATURE));
+        QuicClient.record(addr, NetworksAbility.withQuic(25565, QuicNative.RAW_FEATURE));
         QuicTarget target = QuicClient.quicTargetFor(addr);
         assertNotNull(target);
         assertEquals(25565, target.quicPort());
@@ -51,7 +51,7 @@ class QuicClientTest {
     void fallbackModeAllowsTcp() {
         InetSocketAddress addr = addr();
         QuicClient.setMode(TransportMode.QUIC_WITH_TCP_FALLBACK);
-        QuicClient.record(addr, Networks.withQuic(25565, QuicNative.RAW_FEATURE));
+        QuicClient.record(addr, NetworksAbility.withQuic(25565, QuicNative.RAW_FEATURE));
         QuicTarget target = QuicClient.quicTargetFor(addr);
         assertNotNull(target);
         assertTrue(target.allowTcpFallback());
@@ -62,7 +62,7 @@ class QuicClientTest {
         // ADR-0002：失败仅影响本次连接，不拉黑地址，下次仍尝试 QUIC。
         InetSocketAddress addr = addr();
         QuicClient.setMode(TransportMode.QUIC_ONLY);
-        QuicClient.record(addr, Networks.withQuic(25565, QuicNative.RAW_FEATURE));
+        QuicClient.record(addr, NetworksAbility.withQuic(25565, QuicNative.RAW_FEATURE));
         assertNotNull(QuicClient.quicTargetFor(addr), "应始终可重试 QUIC（无拉黑机制）");
     }
 

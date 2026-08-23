@@ -5,10 +5,10 @@ import com.moandjiezana.toml.TomlWriter;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,7 +23,21 @@ public final class QuicClient {
     public static final String PROP_MODE = "qmc.transport";
     public static final Logger LOGGER = LoggerFactory.getLogger("qmc");
 
-    private static final Map<String, Networks> NETWORKS = new ConcurrentHashMap<>();
+    /** 能力缓存上限：按使用热度淘汰（LRU），超出即逐出最久未命中项。 */
+    private static final int MAX_CACHED_NETWORKS = 256;
+
+    /**
+     * Ping 解析出的能力缓存：access-order {@link LinkedHashMap} 保证
+     * get/put 命中即移到队首，超限自动淘汰队尾（最久未用），内存占用
+     * 有界、无碎片增长。
+     */
+    private static final Map<String, NetworksAbility> NETWORKS =
+            Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, NetworksAbility> eldest) {
+                    return size() > MAX_CACHED_NETWORKS;
+                }
+            });
 
     private static volatile TransportMode mode = parseMode(System.getProperty(PROP_MODE, "tcp"));
     /** 平台入口注册的配置文件路径；未注册（如单测）时不做任何磁盘读写。 */
@@ -119,7 +133,7 @@ public final class QuicClient {
     }
 
     /** 记录一次 Ping 解析出的能力（按解析后的 IP:port 缓存）。 */
-    public static void record(InetSocketAddress address, Networks networks) {
+    public static void record(InetSocketAddress address, NetworksAbility networks) {
         if (address == null || networks == null) {
             return;
         }
@@ -127,11 +141,11 @@ public final class QuicClient {
     }
 
     /** 查询某地址的 QUIC 能力；未 Ping 过返回 empty。 */
-    public static Networks networksFor(InetSocketAddress address) {
+    public static NetworksAbility networksFor(InetSocketAddress address) {
         if (address == null) {
-            return Networks.empty();
+            return NetworksAbility.empty();
         }
-        return NETWORKS.getOrDefault(key(address), Networks.empty());
+        return NETWORKS.getOrDefault(key(address), NetworksAbility.empty());
     }
 
     /**
@@ -146,7 +160,7 @@ public final class QuicClient {
         if (mode == TransportMode.TCP_ONLY || tcpAddress == null) {
             return null;
         }
-        Networks networks = networksFor(tcpAddress);
+        NetworksAbility networks = networksFor(tcpAddress);
         if (!networks.supportsQuicRaw()) {
             return null;
         }

@@ -3,8 +3,10 @@ package top.tangge233.qmc.fabric.mc;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelInitializer;
 import io.netty.channel.epoll.Epoll;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.timeout.ReadTimeoutHandler;
@@ -76,9 +78,9 @@ public final class QuicClientTransport {
                         channel.pipeline().addLast("timeout", new ReadTimeoutHandler(30));
                         // 关键：管线挂载延迟到握手成功（channelActive）之后，
                         // 保证失败路径上 Connection 未被消费，可安全回退 TCP。
-                        channel.pipeline().addLast(new io.netty.channel.ChannelInboundHandlerAdapter() {
+                        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
                             @Override
-                            public void channelActive(io.netty.channel.ChannelHandlerContext ctx) {
+                            public void channelActive(ChannelHandlerContext ctx) {
                                 if (pipelineAttached.compareAndSet(false, true)) {
                                     ChannelPipeline pipeline = ctx.pipeline();
                                     Connection.configureSerialization(

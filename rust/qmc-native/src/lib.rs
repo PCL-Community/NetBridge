@@ -13,16 +13,20 @@
 pub mod bridge;
 
 use jni::errors::Error;
-use jni::{EnvOutcome, EnvUnowned, Outcome};
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jbyteArray, jint, jlong, jlongArray, jstring};
+use jni::sys::{jboolean, jbyte, jbyteArray, jint, jlong, jlongArray, jstring};
+use jni::{EnvOutcome, EnvUnowned, Outcome};
 
 pub const QMC_ABI_VERSION: &str = "0.1.0";
 pub const QMC_RAW_FEATURE: &str = "quic-raw";
 
 /// 统一解析 `with_env` 结果：Err/panic 记日志并返回调用方指定的默认值
 /// （与旧版"错误返回 -1/null"语义一致，细节见 qmc-native 日志）。
-fn resolve_default<T>(outcome: EnvOutcome<'_, T, Error>, context: &str, default: impl FnOnce() -> T) -> T {
+fn resolve_default<T>(
+    outcome: EnvOutcome<'_, T, Error>,
+    context: &str,
+    default: impl FnOnce() -> T,
+) -> T {
     match outcome.into_outcome() {
         Outcome::Ok(value) => value,
         Outcome::Err(e) => {
@@ -183,10 +187,34 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_writeChunk(
     _class: JClass,
     conn: jlong,
     data: JByteArray,
+    length: jint,
 ) -> jint {
+    // 长度在拷贝前校验：负数或超出数组边界为调用方 bug，拒绝而非截断。
+    let arr_len = resolve_default(
+        env.with_env(|env| Ok(env.get_array_length(&data)?)),
+        "writeChunk",
+        || -1,
+    );
+    if arr_len < 0 || !(0..=arr_len).contains(&length) {
+        bridge::report_error(format!(
+            "writeChunk: invalid length {length} for array of {arr_len}"
+        ));
+        return -1;
+    }
+    let len = length as usize;
     // None = 数组读取失败（区别于空数组：空数据合法返回 0）。
     let bytes = resolve_default(
-        env.with_env(|env| env.convert_byte_array(&data).map(Some)),
+        env.with_env(|env| {
+            // 只取 data[0..len)：Java 侧复用暂存区时避免整块冗余拷出。
+            let mut buf = vec![0u8; len];
+            if len > 0 {
+                // SAFETY: jbyte 与 u8 同尺寸同布局，仅按位重解释用于 JNI 拷出。
+                let region: &mut [jbyte] =
+                    unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len) };
+                env.get_byte_array_region(&data, 0, region)?;
+            }
+            Ok::<_, Error>(Some(buf))
+        }),
         "writeChunk",
         || None,
     );

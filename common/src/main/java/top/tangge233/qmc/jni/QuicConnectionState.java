@@ -21,11 +21,12 @@ public enum QuicConnectionState {
     }
 
     public static QuicConnectionState fromCode(int code) {
-        for (QuicConnectionState s : values()) {
-            if (s.code == code) {
-                return s;
-            }
-        }
-        return UNKNOWN;
+        return switch (code) {
+            case QuicNative.STATE_CONNECTING -> CONNECTING;
+            case QuicNative.STATE_CONNECTED -> CONNECTED;
+            case QuicNative.STATE_CLOSED -> CLOSED;
+            case QuicNative.STATE_FAILED -> FAILED;
+            default -> UNKNOWN;
+        };
     }
 }

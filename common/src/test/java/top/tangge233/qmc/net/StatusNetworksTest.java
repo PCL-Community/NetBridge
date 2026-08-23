@@ -14,10 +14,10 @@ class StatusNetworksTest {
         assertTrue(out.contains("\"quic-raw\""), out);
         assertTrue(out.contains("\"protocol\":\"quic-mc/1\""), out);
         assertTrue(out.contains("\"1.21.1\""), out);
-        Networks n = StatusNetworks.parse(out);
+        NetworksAbility n = StatusNetworks.parse(out);
         assertTrue(n.supportsQuicRaw());
         assertEquals(25565, n.quic().port());
-        assertEquals(Networks.PROTOCOL_V1, n.quic().protocol());
+        assertEquals(NetworksAbility.PROTOCOL_V1, n.quic().protocol());
     }
 
     @Test

@@ -86,13 +86,13 @@ class QuicNativeSmokeTest {
 
             // client -> server
             byte[] payload = "quic-mc hello over jni".getBytes(StandardCharsets.UTF_8);
-            int n = QuicNative.writeChunk(client, payload);
+            int n = QuicNative.writeChunk(client, payload, payload.length);
             assertEquals(payload.length, n, "client write");
             assertArrayEquals(payload, awaitRead(serverConn, payload.length));
 
             // server -> client
             byte[] reply = "pong via jni".getBytes(StandardCharsets.UTF_8);
-            assertEquals(reply.length, QuicNative.writeChunk(serverConn, reply),
+            assertEquals(reply.length, QuicNative.writeChunk(serverConn, reply, reply.length),
                     "server write");
             assertArrayEquals(reply, awaitRead(client, reply.length));
 

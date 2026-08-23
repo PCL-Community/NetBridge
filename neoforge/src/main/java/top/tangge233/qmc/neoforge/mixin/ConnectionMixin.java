@@ -9,7 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.qmc.neoforge.mc.QuicClientTransport;
-import top.tangge233.qmc.net.Networks;
+import top.tangge233.qmc.net.NetworksAbility;
 import top.tangge233.qmc.net.QuicClient;
 import top.tangge233.qmc.net.QuicTarget;
 
@@ -38,7 +38,7 @@ public abstract class ConnectionMixin {
         }
         QuicTarget target = QuicClient.quicTargetFor(address);
         if (target == null) {
-            Networks networks = QuicClient.networksFor(address);
+            NetworksAbility networks = QuicClient.networksFor(address);
             String reason = networks.supportsQuicRaw()
                     ? "no quic port advertised"
                     : (networks.quicInfo().isEmpty() ? "server did not advertise networks" : "quic-raw not supported");

@@ -10,6 +10,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerConnectionListener;
 import net.minecraft.server.network.ServerHandshakePacketListenerImpl;
 import top.tangge233.qmc.net.QuicChannel;
+import top.tangge233.qmc.server.QuicServer;
 
 /**
  * 服务端 QUIC 连接收养：把 acceptor 收到的新 QUIC 连接接入 Minecraft
@@ -43,7 +44,7 @@ public final class QuicServerTransport {
         group.register(channel).syncUninterruptibly();
         // 纳入 ServerConnectionListener 的 tick 列表（getConnections 返回内部可变列表）。
         server.getConnection().getConnections().add(connection);
-        top.tangge233.qmc.server.QuicServer.LOGGER.info(
+        QuicServer.LOGGER.info(
                 "QUIC connection " + connId + " adopted into server pipeline (channel " + channel.connId() + ")");
     }
 }

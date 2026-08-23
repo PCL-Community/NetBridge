@@ -4,7 +4,6 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.multiplayer.ServerData;
-import net.minecraft.client.multiplayer.ServerStatusPinger;
 import net.minecraft.network.Connection;
 import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.Mixin;
@@ -12,7 +11,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import top.tangge233.qmc.net.Networks;
+import top.tangge233.qmc.net.NetworksAbility;
 import top.tangge233.qmc.net.QuicClient;
 import top.tangge233.qmc.net.StatusNetworksCapture;
 
@@ -32,7 +31,7 @@ public abstract class ServerStatusPingerResponseMixin {
 
     @Inject(method = "handleStatusResponse", at = @At("RETURN"))
     private void qmc$recordNetworks(CallbackInfo ci) {
-        Networks networks = StatusNetworksCapture.take();
+        NetworksAbility networks = StatusNetworksCapture.take();
         SocketAddress remote = this.val$connection.getRemoteAddress();
         if (remote instanceof InetSocketAddress inetSocketAddress) {
             QuicClient.record(inetSocketAddress, networks);

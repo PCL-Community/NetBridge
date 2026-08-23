@@ -1,7 +1,10 @@
 package top.tangge233.qmc.net;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import java.util.ArrayList;
 import java.util.Objects;
 
 /**
@@ -30,21 +33,21 @@ public final class StatusNetworks {
             // 非有效 JSON 对象：原样返回，不阻断 status 编码。
             return statusJson;
         }
-        if (root.has(Networks.KEY_NETWORKS)) {
+        if (root.has(NetworksAbility.KEY_NETWORKS)) {
             return statusJson;
         }
         JsonObject quic = new JsonObject();
-        quic.addProperty(Networks.KEY_ENABLE, true);
-        var featureArr = new com.google.gson.JsonArray();
+        quic.addProperty(NetworksAbility.KEY_ENABLE, true);
+        var featureArr = new JsonArray();
         for (String f : features) {
             featureArr.add(f);
         }
-        quic.add(Networks.KEY_FEATURES, featureArr);
-        quic.addProperty(Networks.KEY_PORT, quicPort);
-        quic.addProperty(Networks.KEY_PROTOCOL, Networks.PROTOCOL_V1);
+        quic.add(NetworksAbility.KEY_FEATURES, featureArr);
+        quic.addProperty(NetworksAbility.KEY_PORT, quicPort);
+        quic.addProperty(NetworksAbility.KEY_PROTOCOL, NetworksAbility.PROTOCOL_V1);
         JsonObject networks = new JsonObject();
-        networks.add(Networks.KEY_QUIC, quic);
-        root.add(Networks.KEY_NETWORKS, networks);
+        networks.add(NetworksAbility.KEY_QUIC, quic);
+        root.add(NetworksAbility.KEY_NETWORKS, networks);
         return root.toString();
     }
 
@@ -54,35 +57,51 @@ public final class StatusNetworks {
      * @return 解析结果；JSON 缺失/损坏、缺 port 或 {@code enable} 显式为
      *         false 时返回 empty，调用方应视同服务端不支持 QUIC。
      */
-    public static Networks parse(String statusJson) {
+    public static NetworksAbility parse(String statusJson) {
         try {
             JsonObject root = JsonParser.parseString(statusJson).getAsJsonObject();
-            if (!root.has(Networks.KEY_NETWORKS)) {
-                return Networks.empty();
+            return parse(root);
+        } catch (RuntimeException | StackOverflowError e) {
+            // StackOverflowError：恶意构造的深嵌套 JSON 会让 Gson 递归爆栈，
+            // 它是 Error 不走 RuntimeException 分支；吞掉降级为「未宣告」，
+            // 不能让远程包杀死 netty 解码线程。
+            return NetworksAbility.empty();
+        }
+    }
+
+    /**
+     * {@link #parse(String)} 的已解析形态：调用方已有 JsonElement 时复用，
+     * 避免同一份 status JSON 被解析两遍（解码路径每 ping 省一次全量解析）。
+     */
+    public static NetworksAbility parse(JsonElement parsed) {
+        try {
+            JsonObject root = parsed.getAsJsonObject();
+            if (!root.has(NetworksAbility.KEY_NETWORKS)) {
+                return NetworksAbility.empty();
             }
-            JsonObject networks = root.getAsJsonObject(Networks.KEY_NETWORKS);
-            if (!networks.has(Networks.KEY_QUIC)) {
-                return Networks.empty();
+            JsonObject networks = root.getAsJsonObject(NetworksAbility.KEY_NETWORKS);
+            if (!networks.has(NetworksAbility.KEY_QUIC)) {
+                return NetworksAbility.empty();
             }
-            JsonObject quic = networks.getAsJsonObject(Networks.KEY_QUIC);
+            JsonObject quic = networks.getAsJsonObject(NetworksAbility.KEY_QUIC);
             // enable 显式为 false：服务端声明 QUIC 不可用，等同未宣告。
-            if (quic.has(Networks.KEY_ENABLE) && !quic.get(Networks.KEY_ENABLE).getAsBoolean()) {
-                return Networks.empty();
+            if (quic.has(NetworksAbility.KEY_ENABLE) && !quic.get(NetworksAbility.KEY_ENABLE).getAsBoolean()) {
+                return NetworksAbility.empty();
             }
-            if (!quic.has(Networks.KEY_PORT)) {
-                return Networks.empty();
+            if (!quic.has(NetworksAbility.KEY_PORT)) {
+                return NetworksAbility.empty();
             }
-            int port = quic.get(Networks.KEY_PORT).getAsInt();
-            var featureArr = new java.util.ArrayList<String>();
-            if (quic.has(Networks.KEY_FEATURES)) {
-                for (var el : quic.getAsJsonArray(Networks.KEY_FEATURES)) {
+            int port = quic.get(NetworksAbility.KEY_PORT).getAsInt();
+            var featureArr = new ArrayList<String>();
+            if (quic.has(NetworksAbility.KEY_FEATURES)) {
+                for (var el : quic.getAsJsonArray(NetworksAbility.KEY_FEATURES)) {
                     featureArr.add(el.getAsString());
                 }
             }
-            String protocol = quic.has(Networks.KEY_PROTOCOL) ? quic.get(Networks.KEY_PROTOCOL).getAsString() : Networks.PROTOCOL_V1;
-            return Networks.withQuic(port, featureArr.toArray(new String[0]));
-        } catch (RuntimeException e) {
-            return Networks.empty();
+            String protocol = quic.has(NetworksAbility.KEY_PROTOCOL) ? quic.get(NetworksAbility.KEY_PROTOCOL).getAsString() : NetworksAbility.PROTOCOL_V1;
+            return NetworksAbility.withQuic(port, featureArr.toArray(new String[0]));
+        } catch (RuntimeException | StackOverflowError e) {
+            return NetworksAbility.empty();
         }
     }
 }

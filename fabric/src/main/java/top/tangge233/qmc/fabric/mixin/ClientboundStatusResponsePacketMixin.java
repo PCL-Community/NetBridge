@@ -33,8 +33,9 @@ public abstract class ClientboundStatusResponsePacketMixin {
                     target = "Lnet/minecraft/network/FriendlyByteBuf;readJsonWithCodec(Lcom/mojang/serialization/Codec;)Ljava/lang/Object;"))
     private static <T> T qmc$captureNetworks(FriendlyByteBuf buf, Codec<T> codec) {
         String json = buf.readUtf();
-        StatusNetworksCapture.capture(StatusNetworks.parse(json));
         JsonElement element = JsonParser.parseString(json);
+        // 复用同一份解析树：networks 提取与 codec 解码共享 element，不再重复 parse。
+        StatusNetworksCapture.capture(StatusNetworks.parse(element));
         return codec.parse(JsonOps.INSTANCE, element)
                 .getOrThrow(message -> new DecoderException("Failed to decode json: " + message));
     }

@@ -10,20 +10,22 @@ import java.util.concurrent.ConcurrentHashMap;
  * 因此解码时写入本槽（按解码线程隔离），包对象创建后由消费方在同一线程取走。
  */
 public final class StatusNetworksCapture {
-    private static final ConcurrentHashMap<Thread, Networks> LAST = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Thread, NetworksAbility> LAST = new ConcurrentHashMap<>();
 
     private StatusNetworksCapture() {}
 
-    /** 解码线程上记录最近一次解析出的 networks。 */
-    public static void capture(Networks networks) {
-        if (networks != null && !networks.quicInfo().isEmpty()) {
-            LAST.put(Thread.currentThread(), networks);
-        }
+    /**
+     * 解码线程上记录本次解析出的 networks。必须无条件写入（含 empty）：
+     * 槽位以「最近一次解码」为准，若空结果跳过写入，上一条残留值会被
+     * 误配到后续不宣告 QUIC 的服务器包上。
+     */
+    public static void capture(NetworksAbility networks) {
+        LAST.put(Thread.currentThread(), networks == null ? NetworksAbility.empty() : networks);
     }
 
     /** 消费方在包处理时取走当前线程的暂存值；无则 empty。 */
-    public static Networks take() {
-        Networks n = LAST.remove(Thread.currentThread());
-        return n == null ? Networks.empty() : n;
+    public static NetworksAbility take() {
+        NetworksAbility n = LAST.remove(Thread.currentThread());
+        return n == null ? NetworksAbility.empty() : n;
     }
 }

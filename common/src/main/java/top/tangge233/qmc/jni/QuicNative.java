@@ -57,12 +57,13 @@ public final class QuicNative {
     // ---- 数据 ----
 
     /**
-     * 写入一段明文帧字节（批量桥）。
+     * 写入一段明文帧字节（批量桥）：取 {@code data[0..length)} 入队，
+     * 调用方可复用暂存区避免每消息堆分配。
      *
      * @return 实际入队字节数：0 表示队列满/连接未就绪（调用方需缓冲重试，不可丢弃）；
-     *         -1 表示连接不存在或已关闭。
+     *         -1 表示连接不存在、已关闭，或 length 越界（&lt;0 或 &gt; data.length）。
      */
-    public static native int writeChunk(long conn, byte[] data);
+    public static native int writeChunk(long conn, byte[] data, int length);
 
     /** 读取最多 maxBytes 字节；无数据返回空数组；连接不存在返回 null。 */
     public static native byte[] readChunk(long conn, int maxBytes);

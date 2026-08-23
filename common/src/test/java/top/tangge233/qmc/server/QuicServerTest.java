@@ -37,7 +37,7 @@ class QuicServerTest {
         QuicClient.useConfigFile(dir.resolve("client.toml"));
         assertFalse(Files.exists(dir.resolve("server.toml")));
 
-        QuicServer.ServerConfig config = QuicServer.loadServerConfig();
+        QuicServerConfig.ServerConfig config = QuicServerConfig.load();
 
         Path file = dir.resolve("server.toml");
         assertTrue(Files.exists(file), "server.toml should be auto-created");
@@ -54,7 +54,7 @@ class QuicServerTest {
         Files.writeString(dir.resolve("server.toml"),
                 "# my tuning\nport = 30000\nmax_connection = 8\n");
 
-        QuicServer.ServerConfig config = QuicServer.loadServerConfig();
+        QuicServerConfig.ServerConfig config = QuicServerConfig.load();
 
         String content = Files.readString(dir.resolve("server.toml"));
         assertTrue(content.startsWith("# my tuning"), "user file untouched");
