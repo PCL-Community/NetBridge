@@ -20,6 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         # dir = jar 内 native/<os>-<arch>/ 子目录（与 NativeLoader.platformDir() 一致）。
+        # 不含 macos-x86_64：Intel Mac runner 排队过久；Apple Silicon 可走
+        # Rosetta 跑 x86_64 JVM，但需自行提供原生库（loadSystem 回退）。
         include:
           - os: ubuntu-latest
             dir: linux-x86_64
@@ -27,10 +29,7 @@ jobs:
           - os: ubuntu-24.04-arm
             dir: linux-aarch64
             lib: libqmc_native.so
-          - os: macos-13
-            dir: macos-x86_64
-            lib: libqmc_native.dylib
-          - os: macos-14
+          - os: macos-latest
             dir: macos-aarch64
             lib: libqmc_native.dylib
           - os: windows-latest
@@ -78,8 +77,9 @@ jobs:
         with:
           gradle-version: '9.7.1'
 
-      # 五个原生库（3 OS × x86_64/arm64）合并到 build/native/<os>-<arch>/，
-      # jar 打包时原样打入，运行时由 NativeLoader 按 OS+架构选择对应库。
+      # 四个原生库（linux/macos/windows × x86_64/arm64，macOS 仅 arm）合并到
+      # build/native/<os>-<arch>/，jar 打包时原样打入，
+      # 运行时由 NativeLoader 按 OS+架构选择对应库。
       - name: Download all native libraries
         uses: actions/download-artifact@v4
         with:
