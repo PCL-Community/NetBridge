@@ -5,7 +5,7 @@ import java.nio.file.Path;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.LongConsumer;
-import com.moandjiezana.toml.Toml;
+import com.electronwill.nightconfig.core.file.CommentedFileConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import top.tangge233.qmc.jni.NativeLoader;
@@ -26,6 +26,9 @@ public final class QuicServer {
 
     /** 服务端活跃连接数默认上限（配置项 {@code max_connection} 可覆盖）。 */
     public static final int DEFAULT_MAX_CONNECTIONS = 256;
+
+    /** 默认监听端口语义值：跟随 Minecraft TCP 端口。 */
+    public static final int DEFAULT_PORT = -1;
 
     private static volatile long serverHandle = -1;
     private static volatile int port = -1;
@@ -64,7 +67,10 @@ public final class QuicServer {
             return true;
         }
         NativeLoader.load();
-        long handle = QuicNative.startServer(resolveListenPort(preferredPort), resolveMaxConnections());
+        ServerConfig config = loadServerConfig();
+        long handle = QuicNative.startServer(
+                resolveListenPort(config.port(), preferredPort),
+                resolveMaxConnections(config.maxConnection()));
         if (handle < 0) {
             LOGGER.warn("QUIC acceptor start failed (see qmc-native log)");
             return false;
@@ -77,13 +83,44 @@ public final class QuicServer {
         return true;
     }
 
+    /** {@code server.toml} 解析结果；null 字段表示未配置/非法，走内置默认。 */
+    record ServerConfig(Integer port, Integer maxConnection) {}
+
     /**
-     * 解析 QUIC 监听端口（可选配置项）：优先级为系统属性 {@code qmc.quicPort} >
-     * 配置目录下 {@code quic-mc/server.toml} 的 {@code port}。端口语义：
+     * 读取 {@code quic-mc/server.toml}；文件不存在时从 jar 内置模板
+     * {@code server-default.toml} 自动生成（注释即文档，可直接编辑），
+     * 存在则原样读取不回写。解析失败告警并返回空配置（全部走内置
+     * 默认），不阻断启动。
+     */
+    static ServerConfig loadServerConfig() {
+        Path dir = QuicClient.configDir();
+        if (dir == null) {
+            return new ServerConfig(null, null);
+        }
+        Path file = dir.resolve("server.toml");
+        try {
+            Files.createDirectories(dir);
+            CommentedFileConfig config = CommentedFileConfig.builder(file)
+                    .defaultResource("/quic-mc/server-default.toml")
+                    .build();
+            config.load();
+            Integer port = config.get("port");
+            Integer max = config.get("max_connection");
+            config.close();
+            return new ServerConfig(port, max);
+        } catch (Exception e) {
+            LOGGER.warn("Failed to load QUIC server config {}: {}", file, e.toString());
+            return new ServerConfig(null, null);
+        }
+    }
+
+    /**
+     * 解析 QUIC 监听端口：优先级为系统属性 {@code qmc.quicPort} >
+     * {@code server.toml} 的 {@code port}。端口语义：
      * {@code -1} 跟随 Minecraft TCP 端口；{@code 0} 启动时随机分配；
      * 1-65535 直接使用；其余非法值告警并按 -1（跟随 TCP 端口）处理。
      */
-    private static int resolveListenPort(int tcpPort) {
+    private static int resolveListenPort(Integer configuredPort, int tcpPort) {
         String sys = System.getProperty(PROP_QUIC_PORT);
         if (sys != null && !sys.isBlank()) {
             Integer parsed = parsePort(sys.trim(), "system property " + PROP_QUIC_PORT);
@@ -91,23 +128,12 @@ public final class QuicServer {
                 return applyPortSemantics(parsed, tcpPort, PROP_QUIC_PORT);
             }
         }
-        Path configDir = QuicClient.configDir();
-        if (configDir != null) {
-            Path file = configDir.resolve("server.toml");
-            try {
-                if (Files.exists(file)) {
-                    Long value = new Toml().read(file.toFile()).getLong("port");
-                    if (value != null) {
-                        int parsed = value.intValue();
-                        if (parsed >= -1 && parsed <= 65535) {
-                            return applyPortSemantics(parsed, tcpPort, file.toString());
-                        }
-                        LOGGER.warn("Invalid QUIC listen port {} from {}: not -1/0/1-65535", parsed, file);
-                    }
-                }
-            } catch (Exception e) {
-                LOGGER.warn("Failed to read QUIC listen port from {}: {}", file, e.toString());
+        if (configuredPort != null) {
+            int parsed = configuredPort;
+            if (parsed >= -1 && parsed <= 65535) {
+                return applyPortSemantics(parsed, tcpPort, "server.toml");
             }
+            LOGGER.warn("Invalid QUIC listen port {} from server.toml: not -1/0/1-65535", parsed);
         }
         LOGGER.info("QUIC listen port unset; following Minecraft TCP port {}", tcpPort);
         return tcpPort;
@@ -138,29 +164,16 @@ public final class QuicServer {
     }
 
     /**
-     * 解析服务端连接上限：配置文件 {@code quic-mc/server.toml} 的
-     * {@code max_connection}，默认 {@value #DEFAULT_MAX_CONNECTIONS}；
-     * 非法值（&lt;1）告警并回退默认。
+     * 解析服务端连接上限：{@code server.toml} 的 {@code max_connection}，
+     * 默认 {@value #DEFAULT_MAX_CONNECTIONS}；非法值（&lt;1）告警并回退默认。
      */
-    private static int resolveMaxConnections() {
-        Path configDir = QuicClient.configDir();
-        if (configDir != null) {
-            Path file = configDir.resolve("server.toml");
-            try {
-                if (Files.exists(file)) {
-                    Long value = new Toml().read(file.toFile()).getLong("max_connection");
-                    if (value != null) {
-                        int parsed = value.intValue();
-                        if (parsed >= 1) {
-                            LOGGER.info("QUIC max connections {} from {}", parsed, file);
-                            return parsed;
-                        }
-                        LOGGER.warn("Invalid QUIC max connections {} from {}: must be >= 1", parsed, file);
-                    }
-                }
-            } catch (Exception e) {
-                LOGGER.warn("Failed to read QUIC max connections from {}: {}", file, e.toString());
+    private static int resolveMaxConnections(Integer configured) {
+        if (configured != null) {
+            if (configured >= 1) {
+                LOGGER.info("QUIC max connections {} from server.toml", configured);
+                return configured;
             }
+            LOGGER.warn("Invalid QUIC max connections {} from server.toml: must be >= 1", configured);
         }
         return DEFAULT_MAX_CONNECTIONS;
     }

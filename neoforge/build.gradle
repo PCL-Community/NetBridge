@@ -19,20 +19,22 @@ dependencies {
     implementation "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
 }
 
-// MC 运行时不提供 toml4j（gson 由 MC 提供）：独立配置只解析 toml4j 自身，
+// MC 运行时不提供 toml4j/night-config（gson 由 MC 提供）：配置库只解析自身，
 // 随 mod jar 打包，避免触发整个 runtimeClasspath 的解析。
 configurations {
-    toml4jBundle {
+    libBundle {
         // gson 由 MC 运行时提供，不随 jar 打包。
         transitive = false
     }
 }
 
 dependencies {
-    toml4jBundle "com.moandjiezana.toml:toml4j:0.7.2"
+    libBundle "com.moandjiezana.toml:toml4j:0.7.2"
+    libBundle "com.electronwill.night-config:core:3.9.0"
+    libBundle "com.electronwill.night-config:toml:3.9.0"
 }
 
-def toml4jTrees = files(configurations.toml4jBundle.files.collect { zipTree(it) })
+def libBundleTrees = files(configurations.libBundle.files.collect { zipTree(it) })
 
 neoForge {
     version = neoForgeVersion
@@ -52,7 +54,7 @@ tasks.register('jarNeoForge', Jar) {
     from(sourceSets.main.output)
     from(project(':common').sourceSets.main.output)
     from(cdylibDir) { into 'native/' }
-    from(toml4jTrees) {
+    from(libBundleTrees) {
         exclude 'META-INF/**'
     }
 }
