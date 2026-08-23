@@ -58,6 +58,6 @@ Minecraft 客户端与服务端默认使用 TCP。我们希望：
 ## 待办
 
 - Bazel（rules_rust）构建 Rust cdylib（平台 .so），mise 管理工具链（Bazelisk、JDK 21、Rust）。
-- JNI 桥（writeChunk/readChunk 批量接口）。
+- JNI 桥（`writeChunk`/`readChunk` 批量接口；实现另含直写池化直接缓冲区的零分配变体 `readChunkInto`，见 `QuicNative`/`QuicChannel`）。
 - QUIC Channel 适配器 + Netty 集成。
 - Ping `networks` 识别（ADR-0002）。

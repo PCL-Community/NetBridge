@@ -26,10 +26,12 @@ import top.tangge233.qmc.jni.QuicNative;
  *
  * 数据通路：
  * <ul>
- *   <li>写：{@link #doWrite} 把出站 ByteBuf 拷成 byte[]，经 {@link QuicNative#writeChunk} 入队；
- *       队列满时保留在 outbound buffer，由轮询器稍后重试（背压，不丢包）。</li>
- *   <li>读：事件循环上定时轮询 {@link QuicNative#readChunk}，数据到达后
- *       {@code fireChannelRead} 推入管道（配合 MC 的 FlowControlHandler 语义）。</li>
+ *   <li>写：{@link #doWrite} 把出站 ByteBuf 拷进复用 byte[]，经
+ *       {@link QuicNative#writeChunk} 入队；队列满时消息保留在 outbound buffer，
+ *       由轮询器稍后重试（背压，不丢包）。</li>
+ *   <li>读：事件循环上每 {@link #POLL_INTERVAL_MS} 轮询一次，优先经
+ *       {@link QuicNative#readChunkInto} 直写池化 direct buffer，
+ *       {@code fireChannelRead} 推入管道；无数据时本轮空转。</li>
  *   <li>连接：{@link QuicNative#connect} 为异步握手，连接 promise 在握手成功/失败时完成。</li>
  * </ul>
  */
@@ -44,7 +46,7 @@ public class QuicChannel extends AbstractChannel {
     /** 出站暂存区增长上限：更大的包（罕见）按需一次性精确分配，不常驻。 */
     private static final int MAX_SCRATCH_BYTES = 1024 * 1024;
 
-    // 地址常量：InetSocketAddress 不可变，全通道共享（GC 零分配）。
+    // InetSocketAddress 不可变，全通道共享常量，避免每次连接分配。
     private static final InetSocketAddress ADOPT_REMOTE_ADDRESS = new InetSocketAddress("0.0.0.0", 0);
     private static final InetSocketAddress LOCAL_ADDRESS = new InetSocketAddress(0);
 
@@ -167,9 +169,7 @@ public class QuicChannel extends AbstractChannel {
                 in.remove();
                 continue;
             }
-            // JNI 边界说明：Rust 侧不直接操作 JVM 内存（安全边界，ADR-0001），
-            // 出站必须拷进连续 byte[]。GC 优化：复用 EventLoop 线程共享的
-            // WRITE_SCRATCH（倍增扩容），仅超大包一次性精确分配。
+            // 拷进线程共享的 WRITE_SCRATCH（JNI 边界需连续 byte[]，见字段注释）。
             byte[] data;
             if (readable <= MAX_SCRATCH_BYTES) {
                 byte[] scratch = WRITE_SCRATCH.get();
@@ -301,8 +301,7 @@ public class QuicChannel extends AbstractChannel {
         }
         boolean any = false;
         for (int reads = 0; reads < MAX_READS_PER_POLL; reads++) {
-            // 池化 direct buffer：JNI 直写后整包移交管线，读路径稳态零堆分配
-            // （旧 byte[] 路径每次调用新分配 ≤64KB，是 GC 压力主源）。
+            // 池化 direct buffer：JNI 直写后整包移交管线，读路径稳态零堆分配。
             ByteBuf buf = alloc().ioBuffer(MAX_READ_BYTES);
             try {
                 int n = readInto(buf);

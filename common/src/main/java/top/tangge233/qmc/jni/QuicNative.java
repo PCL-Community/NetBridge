@@ -71,10 +71,9 @@ public final class QuicNative {
     public static native byte[] readChunk(long conn, int maxBytes);
 
     /**
-     * 读取最多 maxBytes 字节写入直接缓冲区（GC 友好路径，避免每次调用
-     * 分配新 byte[]）：native 从 {@code buffer} 基址绝对偏移 0 开始写入，
-     * 不读取也不修改其 position/limit。调用方须保证 buffer 为直接缓冲且
-     * 容量 ≥ maxBytes。
+     * 读取最多 maxBytes 字节写入直接缓冲区（{@link #readChunk} 的零分配
+     * 变体）：native 从 {@code buffer} 基址绝对偏移 0 开始写入，不读取也
+     * 不修改其 position/limit。调用方须保证 buffer 为直接缓冲且容量 ≥ maxBytes。
      *
      * @return 实际读取字节数：0 表示暂无数据；
      *         -1 表示连接不存在、已关闭或 buffer/maxBytes 参数非法。
