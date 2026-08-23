@@ -5,21 +5,35 @@
 //!   提供同步的 server/client/state/read/write 原语；
 //! - JNI 导出把这些原语暴露给 Java（`top.tangge233.qmc.jni.QuicNative`），
 //!   每条 QUIC 连接 = 一个双向流，承载整个 MC 会话字节流。
+//!
+//! JNI 层（jni 0.22）：导出函数收 FFI 安全的 [`EnvUnowned`]，需要访问 JNI
+//! 时经 `with_env` 升级为 `&mut Env`；闭包被 catch_unwind 包裹，panic 不会
+//! 穿越原生方法边界 abort 宿主进程。错误统一记 stderr 日志并返回默认值。
 
 pub mod bridge;
 
-use jni::JNIEnv;
+use jni::errors::Error;
+use jni::{EnvOutcome, EnvUnowned, Outcome};
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jlongArray, jstring};
 
 pub const QMC_ABI_VERSION: &str = "0.1.0";
 pub const QMC_RAW_FEATURE: &str = "quic-raw";
 
-macro_rules! jni_err {
-    ($env:expr, $msg:expr, $default:expr) => {{
-        bridge::report_error($msg.to_string());
-        $default
-    }};
+/// 统一解析 `with_env` 结果：Err/panic 记日志并返回调用方指定的默认值
+/// （与旧版"错误返回 -1/null"语义一致，细节见 qmc-native 日志）。
+fn resolve_default<T>(outcome: EnvOutcome<'_, T, Error>, context: &str, default: impl FnOnce() -> T) -> T {
+    match outcome.into_outcome() {
+        Outcome::Ok(value) => value,
+        Outcome::Err(e) => {
+            bridge::report_error(format!("{context}: {e}"));
+            default()
+        }
+        Outcome::Panic(_) => {
+            bridge::report_error(format!("{context}: panicked"));
+            default()
+        }
+    }
 }
 
 /// JNI 端口参数校验：仅接受 0（系统分配）与 1..=65535，其余拒绝。
@@ -29,48 +43,55 @@ fn valid_port(port: jint) -> Option<u16> {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_version(
-    env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
 ) -> jstring {
-    match env.new_string(QMC_ABI_VERSION) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    resolve_default(
+        env.with_env(|env| Ok(env.new_string(QMC_ABI_VERSION)?.into_raw())),
+        "version",
+        std::ptr::null_mut,
+    )
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_rawFeature(
-    env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
 ) -> jstring {
-    match env.new_string(QMC_RAW_FEATURE) {
-        Ok(s) => s.into_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    resolve_default(
+        env.with_env(|env| Ok(env.new_string(QMC_RAW_FEATURE)?.into_raw())),
+        "rawFeature",
+        std::ptr::null_mut,
+    )
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_startServer(
-    _env: JNIEnv,
+    _env: EnvUnowned,
     _class: JClass,
     port: jint,
     max_connections: jint,
 ) -> jlong {
     let Some(port) = valid_port(port) else {
-        return jni_err!(_env, format!("invalid listen port {port}"), -1);
+        bridge::report_error(format!("invalid listen port {port}"));
+        return -1;
     };
     if max_connections < 1 {
-        return jni_err!(_env, format!("invalid max connections {max_connections}"), -1);
+        bridge::report_error(format!("invalid max connections {max_connections}"));
+        return -1;
     }
     match bridge::start_server(port, max_connections as usize) {
         Ok(id) => id as jlong,
-        Err(msg) => jni_err!(_env, msg, -1),
+        Err(msg) => {
+            bridge::report_error(msg);
+            -1
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_serverPort(
-    _env: JNIEnv,
+    _env: EnvUnowned,
     _class: JClass,
     server: jlong,
 ) -> jint {
@@ -81,26 +102,28 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_serverPort(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_acceptConnections(
-    env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     server: jlong,
 ) -> jlongArray {
     let ids = bridge::accept_connections(server as u64);
-    match env.new_long_array(ids.len() as jint) {
-        Ok(arr) => {
-            let raw: Vec<jlong> = ids.into_iter().map(|id| id as jlong).collect();
-            if !raw.is_empty() {
-                let _ = env.set_long_array_region(&arr, 0, &raw);
+    resolve_default(
+        env.with_env(|env| {
+            let arr = env.new_long_array(ids.len())?;
+            if !ids.is_empty() {
+                let raw: Vec<jlong> = ids.iter().map(|id| *id as jlong).collect();
+                arr.set_region(env, 0, &raw)?;
             }
-            arr.as_raw()
-        }
-        Err(_) => std::ptr::null_mut(),
-    }
+            Ok(arr.as_raw())
+        }),
+        "acceptConnections",
+        std::ptr::null_mut,
+    )
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_stopServer(
-    _env: JNIEnv,
+    _env: EnvUnowned,
     _class: JClass,
     server: jlong,
 ) -> jboolean {
@@ -109,27 +132,34 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_stopServer(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_connect(
-    mut env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     host: JString,
     port: jint,
 ) -> jlong {
-    let host_str = match env.get_string(&host) {
-        Ok(s) => String::from(s),
-        Err(_) => return -1,
+    let Some(host) = resolve_default(
+        env.with_env(|env| Ok::<_, Error>(Some(host.try_to_string(env)?))),
+        "connect",
+        || None,
+    ) else {
+        return -1;
     };
     let Some(port) = valid_port(port) else {
-        return jni_err!(env, format!("invalid remote port {port}"), -1);
+        bridge::report_error(format!("invalid remote port {port}"));
+        return -1;
     };
-    match bridge::connect(&host_str, port) {
+    match bridge::connect(&host, port) {
         Ok(id) => id as jlong,
-        Err(msg) => jni_err!(env, msg, -1),
+        Err(msg) => {
+            bridge::report_error(msg);
+            -1
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_connectionState(
-    _env: JNIEnv,
+    _env: EnvUnowned,
     _class: JClass,
     conn: jlong,
 ) -> jint {
@@ -140,7 +170,7 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_connectionState(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_closeConnection(
-    _env: JNIEnv,
+    _env: EnvUnowned,
     _class: JClass,
     conn: jlong,
 ) -> jboolean {
@@ -149,41 +179,47 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_closeConnection(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_writeChunk(
-    env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     conn: jlong,
     data: JByteArray,
 ) -> jint {
-    let bytes = match env.convert_byte_array(&data) {
-        Ok(b) => b,
-        Err(_) => return -1,
+    // None = 数组读取失败（区别于空数组：空数据合法返回 0）。
+    let bytes = resolve_default(
+        env.with_env(|env| env.convert_byte_array(&data).map(Some)),
+        "writeChunk",
+        || None,
+    );
+    let Some(bytes) = bytes else {
+        return -1;
     };
     // Vec<u8> → Bytes 为零成本接管分配，无拷贝。
     match bridge::write_chunk(conn as u64, bytes.into()) {
         Ok(n) => n as jint,
-        Err(msg) => jni_err!(env, msg, -1),
+        Err(msg) => {
+            bridge::report_error(msg);
+            -1
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_readChunk(
-    env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     conn: jlong,
     max_bytes: jint,
 ) -> jbyteArray {
     let max = max_bytes.max(0) as usize;
-    let bytes = match bridge::read_chunk(conn as u64, max) {
-        Ok(b) => b,
-        Err(msg) => {
-            bridge::report_error(msg);
-            return std::ptr::null_mut();
-        }
+    let Ok(bytes) = bridge::read_chunk(conn as u64, max) else {
+        // read_chunk 内部已上报错误。
+        return std::ptr::null_mut();
     };
-    match env.byte_array_from_slice(&bytes) {
-        Ok(arr) => arr.as_raw(),
-        Err(_) => std::ptr::null_mut(),
-    }
+    resolve_default(
+        env.with_env(|env| Ok(env.byte_array_from_slice(&bytes)?.as_raw())),
+        "readChunk",
+        std::ptr::null_mut,
+    )
 }
 
 #[cfg(test)]
