@@ -44,6 +44,8 @@ tasks.named('test') {
     useJUnitPlatform()
     dependsOn(rootProject.tasks.named('buildCdylib'))
     jvmArgs("-Djava.library.path=${cdylibDir.get().asFile}")
+    // JDK 24+：放行 JNI 加载（System::loadLibrary）并静音 netty 的 sun.misc.Unsafe 弃用告警。
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "--sun-misc-unsafe-memory-access=allow")
 }
 
 tasks.named('jar') {

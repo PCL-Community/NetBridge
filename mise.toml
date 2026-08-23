@@ -1,5 +1,0 @@
-[tools]
-# Java 生态由 mise 管理：JDK21 + Gradle
-java = "21"            # 最新 21.x（当前机器已有 Temurin 21）
-gradle = "latest"      # Gradle 由 mise 管理（你已执行 mise use -g gradle 或等效）
-# Rust 不交给 mise：使用系统 cargo/rustc（1.97.1）

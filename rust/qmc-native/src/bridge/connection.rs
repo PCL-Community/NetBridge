@@ -133,6 +133,8 @@ pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Bytes, String> {
 /// `to_quic_tx` 克隆，使主循环 `to_quic_rx.recv()` 返回 None 而收尾
 /// （置 CLOSED、清理 registry）。此后 Java 侧 writeChunk 也会因 channel
 /// 关闭得到错误——读写两条路径都能感知连接死亡，客户端不会挂起。
+// 参数均为独立原语（流/channel/状态），强行打包成结构体反增间接层。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     conn_id: u64,
     conn: quinn::Connection,

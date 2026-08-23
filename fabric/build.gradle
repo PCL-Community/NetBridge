@@ -19,8 +19,8 @@ dependencies {
     minecraft "com.mojang:minecraft:${minecraftVersion}"
     mappings loom.officialMojangMappings()
     modImplementation "net.fabricmc:fabric-loader:0.17.2"
-    // Mixin 注解处理器：mojmap 源码编译 + remapJar 重映射
-    annotationProcessor 'net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7'
+    // Mixin 注解处理器由新版 Loom（≥1.12）自动提供，勿手动添加 sponge-mixin，
+    // 否则旧 AP 与新 Loom 冲突导致 "Unable to locate obfuscation mapping"。
     implementation project(':common')
     implementation "io.netty:netty-common:4.1.97.Final"
     implementation "io.netty:netty-buffer:4.1.97.Final"

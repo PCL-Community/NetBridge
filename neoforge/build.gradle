@@ -19,8 +19,9 @@ dependencies {
     implementation "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
 }
 
-// MC 运行时不提供 toml4j/night-config（gson 由 MC 提供）：配置库只解析自身，
-// 随 mod jar 打包，避免触发整个 runtimeClasspath 的解析。
+// NeoForge 运行时自带 night-config（JPMS 模块 com.electronwill.nightconfig.*），
+// 再打包会触发 split package 冲突（ResolutionException）；gson/toml4j 由本 jar 提供，
+// 其中 gson 实际由 MC 运行时提供，不随 jar 打包。
 configurations {
     libBundle {
         // gson 由 MC 运行时提供，不随 jar 打包。
@@ -30,8 +31,6 @@ configurations {
 
 dependencies {
     libBundle "com.moandjiezana.toml:toml4j:0.7.2"
-    libBundle "com.electronwill.night-config:core:3.9.0"
-    libBundle "com.electronwill.night-config:toml:3.9.0"
 }
 
 def libBundleTrees = files(configurations.libBundle.files.collect { zipTree(it) })

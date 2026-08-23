@@ -190,12 +190,16 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_writeChunk(
     length: jint,
 ) -> jint {
     // 长度在拷贝前校验：负数或超出数组边界为调用方 bug，拒绝而非截断。
-    let arr_len = resolve_default(
-        env.with_env(|env| Ok(env.get_array_length(&data)?)),
+    let arr_len: Option<usize> = resolve_default(
+        env.with_env(|env| data.len(env).map(Some)),
         "writeChunk",
-        || -1,
+        || None,
     );
-    if arr_len < 0 || !(0..=arr_len).contains(&length) {
+    let Some(arr_len) = arr_len else {
+        bridge::report_error("writeChunk: failed to read array length".to_string());
+        return -1;
+    };
+    if length < 0 || length as usize > arr_len {
         bridge::report_error(format!(
             "writeChunk: invalid length {length} for array of {arr_len}"
         ));
@@ -211,7 +215,7 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_writeChunk(
                 // SAFETY: jbyte 与 u8 同尺寸同布局，仅按位重解释用于 JNI 拷出。
                 let region: &mut [jbyte] =
                     unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len) };
-                env.get_byte_array_region(&data, 0, region)?;
+                data.get_region(env, 0, region)?;
             }
             Ok::<_, Error>(Some(buf))
         }),
