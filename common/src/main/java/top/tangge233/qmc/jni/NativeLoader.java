@@ -7,9 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * 从打包 jar 中解出原生库并加载（跨平台选择 .so/.dylib/.dll）。
- *
- * 当前仅实现 Linux .so；Windows/macOS 后续补充。
+ * 从打包 jar 中解出原生库并加载（按 {@code native/<os>-<arch>/} 选择
+ * .so/.dylib/.dll，覆盖 linux/macos/windows × x86_64/aarch64）。
  */
 public final class NativeLoader {
     private static boolean loaded;
@@ -27,12 +26,31 @@ public final class NativeLoader {
         return "libqmc_native.so";
     }
 
+    /**
+     * 当前平台目录名（{@code <os>-<arch>}，与 Gradle buildCdylib、CI
+     * matrix 的 stage 目录一致）：linux/macos/windows × x86_64/aarch64。
+     */
+    public static String platformDir() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        String osDir = os.contains("win") ? "windows"
+                : (os.contains("mac") || os.contains("darwin")) ? "macos" : "linux";
+        String arch = System.getProperty("os.arch", "").toLowerCase();
+        String archDir = (arch.equals("amd64") || arch.equals("x86_64")) ? "x86_64"
+                : (arch.equals("aarch64") || arch.equals("arm64")) ? "aarch64" : arch;
+        return osDir + "-" + archDir;
+    }
+
+    /** jar 内原生库资源全路径：{@code native/<os>-<arch>/<文件名>}。 */
+    public static String nativeResourcePath() {
+        return "native/" + platformDir() + "/" + nativeResourceName();
+    }
+
     /** 加载打包在 classpath 中的原生库（LD_LIBRARY_PATH 不满足时使用）。 */
     public static synchronized void loadFromClasspath() {
         if (loaded) {
             return;
         }
-        String resource = "native/" + nativeResourceName();
+        String resource = nativeResourcePath();
         try (InputStream in = NativeLoader.class.getResourceAsStream("/" + resource)) {
             if (in == null) {
                 throw new IllegalStateException("native resource not found in classpath: " + resource);

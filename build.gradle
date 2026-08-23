@@ -21,11 +21,19 @@ if (!(nativeProfile in ['debug', 'release'])) {
 def cargoDir = file('rust/qmc-native')
 def cdylibDir = file("$buildDir/native")
 
-// 按当前 OS 选择 cargo 产出的 cdylib 文件名（与 NativeLoader.nativeResourceName() 一致）。
+// 按当前 OS/架构选择 cargo 产出的 cdylib 文件名与 jar 内子目录
+// （与 NativeLoader.platformDir()/nativeResourceName() 一致）。
 def osName = System.getProperty('os.name', '').toLowerCase()
+def archName = System.getProperty('os.arch', '').toLowerCase()
 def cdylibName = osName.contains('win') ? 'qmc_native.dll'
         : (osName.contains('mac') || osName.contains('darwin')) ? 'libqmc_native.dylib'
         : 'libqmc_native.so'
+def nativeOsDir = osName.contains('win') ? 'windows'
+        : (osName.contains('mac') || osName.contains('darwin')) ? 'macos' : 'linux'
+def nativeArchDir = (archName in ['x86_64', 'amd64']) ? 'x86_64' : (archName in ['aarch64', 'arm64']) ? 'aarch64' : archName
+def nativeSubdir = "${nativeOsDir}-${nativeArchDir}"
+// 供子项目（:common 测试 java.library.path）引用。
+ext.nativeSubdir = nativeSubdir
 
 tasks.register('buildCdylib') {
     // CI 预置三平台库到 build/native 后可用 -PskipNativeBuild 跳过本机 cargo 构建。
@@ -48,7 +56,9 @@ tasks.register('buildCdylib') {
         if (!src.exists()) {
             throw new GradleException("Rust cdylib not found after cargo build: ${src}")
         }
-        def dst = new File(cdylibDir, src.name)
+        def dstDir = new File(cdylibDir, nativeSubdir)
+        dstDir.mkdirs()
+        def dst = new File(dstDir, src.name)
         Files.copy(src.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING)
         println "copied native (${nativeProfile}): ${src} -> ${dst}"
     }

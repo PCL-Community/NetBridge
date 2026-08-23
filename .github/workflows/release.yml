@@ -14,20 +14,27 @@ concurrency:
 
 jobs:
   native:
-    name: native (${{ matrix.os }})
+    name: native (${{ matrix.dir }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # dir = jar 内 native/<os>-<arch>/ 子目录（与 NativeLoader.platformDir() 一致）。
         include:
           - os: ubuntu-latest
-            artifact: native-linux
+            dir: linux-x86_64
             lib: libqmc_native.so
-          - os: macos-latest
-            artifact: native-macos
+          - os: ubuntu-24.04-arm
+            dir: linux-aarch64
+            lib: libqmc_native.so
+          - os: macos-13
+            dir: macos-x86_64
+            lib: libqmc_native.dylib
+          - os: macos-14
+            dir: macos-aarch64
             lib: libqmc_native.dylib
           - os: windows-latest
-            artifact: native-windows
+            dir: windows-x86_64
             lib: qmc_native.dll
     steps:
       - uses: actions/checkout@v4
@@ -42,11 +49,17 @@ jobs:
         working-directory: rust/qmc-native
         run: cargo build --release
 
+      # artifact 内保持 <dir>/<lib> 结构；package job merge-multiple 后
+      # 恰好还原为 build/native/<dir>/<lib>，Gradle 原样打入 jar。
+      - name: Stage native library
+        shell: bash
+        run: mkdir -p stage/${{ matrix.dir }} && cp rust/qmc-native/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
+
       - name: Upload native library
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: rust/qmc-native/target/release/${{ matrix.lib }}
+          name: native-${{ matrix.dir }}
+          path: stage
           if-no-files-found: error
 
   package:
@@ -65,8 +78,8 @@ jobs:
         with:
           gradle-version: '9.7.1'
 
-      # 三平台原生库合并到 build/native/，jar 打包时全部打入 native/ 路径，
-      # 运行时由 NativeLoader 按 OS 选择对应库。
+      # 五个原生库（3 OS × x86_64/arm64）合并到 build/native/<os>-<arch>/，
+      # jar 打包时原样打入，运行时由 NativeLoader 按 OS+架构选择对应库。
       - name: Download all native libraries
         uses: actions/download-artifact@v4
         with:
