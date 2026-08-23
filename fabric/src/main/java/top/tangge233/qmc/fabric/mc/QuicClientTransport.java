@@ -5,6 +5,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.epoll.Epoll;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import java.net.InetSocketAddress;
@@ -62,7 +63,9 @@ public final class QuicClientTransport {
             int quicPort,
             AtomicBoolean pipelineAttached) {
         EventLoopGroup group =
-                useEpoll ? Connection.NETWORK_EPOLL_WORKER_GROUP.get() : Connection.NETWORK_WORKER_GROUP.get();
+                useEpoll && Epoll.isAvailable()
+                        ? Connection.NETWORK_EPOLL_WORKER_GROUP.get()
+                        : Connection.NETWORK_WORKER_GROUP.get();
         InetSocketAddress quicAddress = new InetSocketAddress(tcpAddress.getAddress(), quicPort);
         Bootstrap bootstrap = new Bootstrap()
                 .group(group)
