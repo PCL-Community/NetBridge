@@ -1,7 +1,6 @@
 package top.tangge233.qmc.net;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelMetadata;
@@ -9,10 +8,12 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.EventLoop;
+import io.netty.util.concurrent.FastThreadLocal;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -50,11 +51,18 @@ public class QuicChannel extends AbstractChannel {
     private final ChannelConfig config = new DefaultChannelConfig(this);
     private final AtomicBoolean closed = new AtomicBoolean();
     /**
-     * 出站写暂存区：JNI 边界必须连续 byte[]（安全值拷贝），这里按
-     * EventLoop 单线程独占复用同一数组，消除每消息的堆分配；倍增扩容，
-     * 超过 {@link #MAX_SCRATCH_BYTES} 的大包改用一次性精确分配。
+     * 出站写暂存区：JNI 边界必须连续 byte[]（安全值拷贝）。按 EventLoop
+     * 线程共享复用（doWrite 只在 channel 所属 EventLoop 上执行，多通道
+     * 天然串行），消除每消息堆分配；倍增扩容，超过 {@link #MAX_SCRATCH_BYTES}
+     * 的大包改用一次性精确分配。驻留成本 = 每 worker 线程至多一个数组，
+     * 而非每通道一个。
      */
-    private byte[] writeScratch;
+    private static final FastThreadLocal<byte[]> WRITE_SCRATCH = new FastThreadLocal<>() {
+        @Override
+        protected byte[] initialValue() {
+            return new byte[4096];
+        }
+    };
 
     private volatile long connId = -1;
     private volatile boolean connected;
@@ -62,12 +70,6 @@ public class QuicChannel extends AbstractChannel {
     private volatile InetSocketAddress remoteAddress;
     private volatile ScheduledFuture<?> pollTask;
     private volatile ChannelPromise connectPromise;
-    /** flush 重试任务：无状态，单实例随通道复用。 */
-    private final Runnable flushRetryTask = () -> {
-        if (isOpen() && connected) {
-            unsafe().flush();
-        }
-    };
 
     public QuicChannel() {
         super(null);
@@ -166,16 +168,16 @@ public class QuicChannel extends AbstractChannel {
                 continue;
             }
             // JNI 边界说明：Rust 侧不直接操作 JVM 内存（安全边界，ADR-0001），
-            // 出站必须拷进连续 byte[]。GC 优化：复用 EventLoop 独占的
-            // writeScratch（倍增扩容），仅超大包一次性精确分配。
+            // 出站必须拷进连续 byte[]。GC 优化：复用 EventLoop 线程共享的
+            // WRITE_SCRATCH（倍增扩容），仅超大包一次性精确分配。
             byte[] data;
             if (readable <= MAX_SCRATCH_BYTES) {
-                if (writeScratch == null) {
-                    writeScratch = new byte[Math.max(4096, readable)];
-                } else if (writeScratch.length < readable) {
-                    writeScratch = new byte[Math.max(readable, writeScratch.length << 1)];
+                byte[] scratch = WRITE_SCRATCH.get();
+                if (scratch.length < readable) {
+                    scratch = new byte[Math.max(readable, scratch.length << 1)];
+                    WRITE_SCRATCH.set(scratch);
                 }
-                data = writeScratch;
+                data = scratch;
             } else {
                 data = new byte[readable];
             }
@@ -199,9 +201,8 @@ public class QuicChannel extends AbstractChannel {
             in.remove();
             written++;
         }
-        if (in.current() != null) {
-            scheduleFlushRetry();
-        }
+        // 队列仍有剩余时无需另排重试任务：轮询器每 5ms 必调
+        // unsafe().flush()（见 poll()），独立 schedule 任务只会重复。
     }
 
     @Override
@@ -235,10 +236,6 @@ public class QuicChannel extends AbstractChannel {
     /** 当前 QUIC 连接 id；未连接时为 -1。 */
     public long connId() {
         return connId;
-    }
-
-    private void scheduleFlushRetry() {
-        eventLoop().schedule(flushRetryTask, POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     /** 事件循环上驱动：读取可用数据 + 重试 pending 写。 */
@@ -304,26 +301,55 @@ public class QuicChannel extends AbstractChannel {
         }
         boolean any = false;
         for (int reads = 0; reads < MAX_READS_PER_POLL; reads++) {
-            byte[] data = QuicNative.readChunk(connId, MAX_READ_BYTES);
-            if (data == null) {
-                pipeline().fireExceptionCaught(new IOException("quic read failed (conn " + connId + ", see qmc-native log)"));
-                break;
-            }
-            if (data.length == 0) {
-                break;
-            }
-            // data 为 JNI 每次调用新分配的独占数组：零拷贝包装直接移交，
-            // 省去池化 buffer checkout 与一次 memcpy；下游 release 后
-            // 包装对象与数组一并回收。
-            pipeline().fireChannelRead(Unpooled.wrappedBuffer(data));
-            any = true;
-            if (data.length < MAX_READ_BYTES) {
-                break;
+            // 池化 direct buffer：JNI 直写后整包移交管线，读路径稳态零堆分配
+            // （旧 byte[] 路径每次调用新分配 ≤64KB，是 GC 压力主源）。
+            ByteBuf buf = alloc().ioBuffer(MAX_READ_BYTES);
+            try {
+                int n = readInto(buf);
+                if (n < 0) {
+                    pipeline().fireExceptionCaught(new IOException(
+                            "quic read failed (conn " + connId + ", see qmc-native log)"));
+                    break;
+                }
+                if (n == 0) {
+                    break;
+                }
+                buf.writerIndex(n);
+                pipeline().fireChannelRead(buf);
+                buf = null; // 所有权移交管线，下游负责 release。
+                any = true;
+                if (n < MAX_READ_BYTES) {
+                    break;
+                }
+            } finally {
+                if (buf != null) {
+                    buf.release();
+                }
             }
         }
         if (any) {
             pipeline().fireChannelReadComplete();
         }
+    }
+
+    /**
+     * 单次 JNI 读入 {@code buf}。优先走 {@link QuicNative#readChunkInto}
+     * 直接写池化 direct 内存；非 direct/复合视图（nioBuffer 为 null）退化到
+     * 旧 byte[] 路径。返回 -1 表示连接级错误，0 表示暂无数据。
+     */
+    private int readInto(ByteBuf buf) {
+        ByteBuffer nio = buf.nioBuffer(buf.writerIndex(), buf.writableBytes());
+        if (nio != null && nio.isDirect()) {
+            return QuicNative.readChunkInto(connId, nio, Math.min(buf.writableBytes(), MAX_READ_BYTES));
+        }
+        byte[] data = QuicNative.readChunk(connId, MAX_READ_BYTES);
+        if (data == null) {
+            return -1;
+        }
+        if (data.length > 0) {
+            buf.writeBytes(data);
+        }
+        return data.length;
     }
 
     private void startPoller(ChannelPromise promise) {

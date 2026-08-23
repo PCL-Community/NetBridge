@@ -13,7 +13,7 @@
 pub mod bridge;
 
 use jni::errors::Error;
-use jni::objects::{JByteArray, JClass, JString};
+use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
 use jni::sys::{jboolean, jbyte, jbyteArray, jint, jlong, jlongArray, jstring};
 use jni::{EnvOutcome, EnvUnowned, Outcome};
 
@@ -252,6 +252,54 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_readChunk(
         "readChunk",
         std::ptr::null_mut,
     )
+}
+
+/// GC 友好读路径：native 直写调用方提供的直接缓冲区，避免每次调用
+/// 分配新 jbyteArray。JNI `GetDirectBufferAddress` 返回缓冲区基址、
+/// 不感知 position/limit，故约定从基址绝对偏移 0 写入（Java 侧传入的
+/// 视图 position 恒为写入起点）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_readChunkInto(
+    mut env: EnvUnowned,
+    _class: JClass,
+    conn: jlong,
+    buffer: JByteBuffer,
+    max_bytes: jint,
+) -> jint {
+    if max_bytes < 0 {
+        bridge::report_error(format!("readChunkInto: invalid max_bytes {max_bytes}"));
+        return -1;
+    }
+    // 非直接缓冲 / 已释放 / null 均为调用方 bug：-1 而非截断。
+    let Some(dst) = resolve_default(
+        env.with_env(|env| {
+            let addr = env.get_direct_buffer_address(&buffer)?;
+            let cap = env.get_direct_buffer_capacity(&buffer)?;
+            // SAFETY: addr 指向 JVM 直接缓冲区内存且 cap 为其可写字节数；
+            // JNI 约定该指针仅在本次原生调用内使用。
+            Ok::<_, Error>(Some(unsafe {
+                std::slice::from_raw_parts_mut(addr, cap)
+            }))
+        }),
+        "readChunkInto",
+        || None,
+    ) else {
+        bridge::report_error("readChunkInto: failed to access direct buffer".to_string());
+        return -1;
+    };
+    let want = (max_bytes as usize).min(dst.len());
+    match bridge::read_chunk(conn as u64, want) {
+        Ok(bytes) => {
+            // read_chunk 保证返回长度 ≤ want ≤ dst.len()。
+            let n = bytes.len();
+            dst[..n].copy_from_slice(&bytes);
+            n as jint
+        }
+        Err(msg) => {
+            bridge::report_error(msg);
+            -1
+        }
+    }
 }
 
 #[cfg(test)]

@@ -25,12 +25,15 @@ public final class NetworksAbility {
 
     private final Map<String, QuicInfo> quicInfo;
 
+    /** 共享空实例：本类不可变，empty() 高频 miss 路径免重复分配。 */
+    private static final NetworksAbility EMPTY = new NetworksAbility(Map.of());
+
     private NetworksAbility(Map<String, QuicInfo> quicInfo) {
         this.quicInfo = quicInfo == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(quicInfo));
     }
 
     public static NetworksAbility empty() {
-        return new NetworksAbility(Map.of());
+        return EMPTY;
     }
 
     /** 构造一个声明 QUIC 能力的 NetworksAbility（简化便捷方法）。 */
