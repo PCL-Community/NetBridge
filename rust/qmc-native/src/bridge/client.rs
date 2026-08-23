@@ -1,9 +1,11 @@
 //! 客户端 QUIC 连接：异步握手，立即返回连接 id。
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use super::connection::run_connection;
@@ -19,14 +21,14 @@ use super::{ConnHandle, STATE_CONNECTING};
 pub fn connect(host: &str, port: u16) -> Result<u64, String> {
     let rt = runtime();
     let (to_quic_tx, to_quic_rx) = mpsc::channel::<super::Command>(4096);
-    let (to_java_tx, to_java_rx) = mpsc::channel::<Vec<u8>>(8192);
+    let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
     let conn_id = allocate_id();
     conns().insert(
         conn_id,
         ConnHandle {
             state: state.clone(),
-            to_java: Arc::new(Mutex::new((to_java_rx, Vec::new()))),
+            to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
             to_quic: to_quic_tx.clone(),
             server_id: None,
             reported: std::sync::atomic::AtomicBool::new(true),

@@ -1,7 +1,10 @@
 //! 服务端 QUIC acceptor：endpoint 生命周期与连接 accept。
 
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use bytes::Bytes;
 
 use super::connection::run_connection;
 use super::registry::{allocate_id, conns, runtime, servers};
@@ -125,21 +128,21 @@ pub fn accept_connections(server: u64) -> Vec<u64> {
 pub struct Registered {
     pub conn_id: u64,
     pub to_quic_rx: tokio::sync::mpsc::Receiver<Command>,
-    pub to_java_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    pub to_java_tx: tokio::sync::mpsc::Sender<Bytes>,
     pub to_quic_tx: tokio::sync::mpsc::Sender<Command>,
     pub state: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 fn register_connection(server_id: u64) -> Registered {
     let (to_quic_tx, to_quic_rx) = tokio::sync::mpsc::channel::<Command>(4096);
-    let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8192);
+    let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Bytes>(8192);
     let state = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(STATE_CONNECTED));
     let conn_id = allocate_id();
     conns().insert(
         conn_id,
         ConnHandle {
             state: state.clone(),
-            to_java: Arc::new(std::sync::Mutex::new((to_java_rx, Vec::new()))),
+            to_java: Arc::new(std::sync::Mutex::new((to_java_rx, VecDeque::new()))),
             to_quic: to_quic_tx.clone(),
             server_id: Some(server_id),
             reported: std::sync::atomic::AtomicBool::new(false),

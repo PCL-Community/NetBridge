@@ -1,6 +1,14 @@
 //! 单连接数据面：状态查询、批量读写、优雅关闭与读写循环。
+//!
+//! 零拷贝约定：读侧经 quinn `read_chunk` 直取 `Bytes`，单块满足时零
+//! 重组直返 JNI 层；超长块用 `slice` 共享视图切分；仅多块拼接时才
+//! 复制进 `BytesMut`。写侧由 JNI 拷出的 `Vec<u8>` 零成本转 `Bytes`。
 
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+
+use bytes::{Bytes, BytesMut};
+use tokio::sync::mpsc;
 
 use super::Command;
 use super::registry::conns;
@@ -34,10 +42,11 @@ pub fn close_connection(conn: u64) -> bool {
 /// - 满队列返回 0（Java 侧应做背压缓冲，不可丢弃）；
 /// - 连接未就绪返回 0；
 /// - 连接已关闭返回 Err。
-pub fn write_chunk(conn: u64, data: &[u8]) -> Result<usize, String> {
+pub fn write_chunk(conn: u64, data: Bytes) -> Result<usize, String> {
     if data.is_empty() {
         return Ok(0);
     }
+    let len = data.len();
     let Some(handle) = conns().get(&conn) else {
         return Err("no such connection".to_string());
     };
@@ -47,15 +56,27 @@ pub fn write_chunk(conn: u64, data: &[u8]) -> Result<usize, String> {
     if !connected {
         return Ok(0);
     }
-    match to_quic.try_send(Command::Write(data.to_vec())) {
-        Ok(()) => Ok(data.len()),
+    match to_quic.try_send(Command::Write(data)) {
+        Ok(()) => Ok(len),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(0),
         Err(_) => Err("connection closed".to_string()),
     }
 }
 
-/// 读取最多 max_bytes 字节；无数据时返回空 Vec。
-pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
+/// 从队列取下一块：残留块优先，其后为 channel。
+fn pull(
+    rx: &mut mpsc::Receiver<Bytes>,
+    pending: &mut VecDeque<Bytes>,
+) -> Option<Bytes> {
+    pending.pop_front().or_else(|| rx.try_recv().ok())
+}
+
+/// 读取最多 max_bytes 字节；无数据时返回空 Bytes。
+///
+/// 零拷贝策略：首块即满足（含恰好等于）直接移交；超长用 `slice`
+/// 共享视图切分、尾部回队；仅多块拼接时复制进 `BytesMut`（JNI 边界
+/// 需要连续内存，此为唯一不可避免的重组拷贝）。
+pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Bytes, String> {
     let Some(handle) = conns().get(&conn) else {
         return Err("no such connection".to_string());
     };
@@ -68,31 +89,37 @@ pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
     };
     let (rx, pending) = &mut *guard;
 
-    let mut out = Vec::new();
-    if !pending.is_empty() {
-        let take = max_bytes.min(pending.len());
-        out.extend_from_slice(&pending[..take]);
-        pending.drain(..take);
-        if out.len() >= max_bytes {
-            return Ok(out);
-        }
+    let first = match pull(rx, pending) {
+        Some(b) => b,
+        None => return Ok(Bytes::new()),
+    };
+    if first.len() > max_bytes {
+        pending.push_front(first.slice(max_bytes..));
+        return Ok(first.slice(..max_bytes));
     }
-    while out.len() < max_bytes {
-        match rx.try_recv() {
-            Ok(chunk) => {
-                let take = (max_bytes - out.len()).min(chunk.len());
-                out.extend_from_slice(&chunk[..take]);
-                if take < chunk.len() {
-                    pending.extend_from_slice(&chunk[take..]);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    Ok(out)
-}
 
-use tokio::sync::mpsc;
+    match pull(rx, pending) {
+        None => Ok(first),
+        Some(second) => {
+            let mut out = BytesMut::with_capacity(max_bytes);
+            out.extend_from_slice(&first);
+            drop(first);
+            let mut next = Some(second);
+            while out.len() < max_bytes {
+                let Some(mut chunk) = next.take().or_else(|| pull(rx, pending)) else {
+                    break;
+                };
+                if out.len() + chunk.len() > max_bytes {
+                    let cut = max_bytes - out.len();
+                    pending.push_front(chunk.slice(cut..));
+                    chunk = chunk.slice(..cut);
+                }
+                out.extend_from_slice(&chunk);
+            }
+            Ok(out.freeze())
+        }
+    }
+}
 
 /// 单连接读写循环：读侧推入 Java 队列，写侧消费 Java 命令。
 ///
@@ -106,18 +133,20 @@ pub async fn run_connection(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     mut to_quic_rx: mpsc::Receiver<Command>,
-    to_java_tx: mpsc::Sender<Vec<u8>>,
+    to_java_tx: mpsc::Sender<Bytes>,
     to_quic_tx: mpsc::Sender<Command>,
     state: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) {
     let reader = {
         let to_quic_tx = to_quic_tx.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
             loop {
-                match recv.read(&mut buf).await {
-                    Ok(Some(n)) => {
-                        if to_java_tx.send(buf[..n].to_vec()).await.is_err() {
+                match recv.read_chunk(65536, true).await {
+                    Ok(Some(chunk)) => {
+                        if chunk.bytes.is_empty() {
+                            continue;
+                        }
+                        if to_java_tx.send(chunk.bytes).await.is_err() {
                             break;
                         }
                     }
@@ -125,7 +154,6 @@ pub async fn run_connection(
                     Err(_) => break,
                 }
             }
-            // 对端已关闭：释放 sender，令主循环的 recv() 返回 None。
             drop(to_quic_tx);
         })
     };

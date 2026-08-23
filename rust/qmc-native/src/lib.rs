@@ -143,7 +143,8 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_writeChunk(
         Ok(b) => b,
         Err(_) => return -1,
     };
-    match bridge::write_chunk(conn as u64, &bytes) {
+    // Vec<u8> → Bytes 为零成本接管分配，无拷贝。
+    match bridge::write_chunk(conn as u64, bytes.into()) {
         Ok(n) => n as jint,
         Err(msg) => jni_err!(env, msg, -1),
     }
@@ -187,6 +188,7 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_lastError(
 #[cfg(test)]
 mod tests {
     use super::bridge::*;
+    use bytes::Bytes;
     use std::time::{Duration, Instant};
 
     fn wait_state(conn: u64, want: u32) {
@@ -228,7 +230,7 @@ mod tests {
         loop {
             if let Ok(data) = read_chunk(conn, 65536) {
                 if data.len() >= want {
-                    return data;
+                    return data.to_vec();
                 }
             }
             assert!(Instant::now() < deadline, "timeout waiting for read");
@@ -269,7 +271,7 @@ mod tests {
         // client -> server
         let payload = b"quic-mc hello over bridge";
         assert_eq!(
-            write_chunk(client, payload).expect("client write"),
+            write_chunk(client, Bytes::copy_from_slice(payload)).expect("client write"),
             payload.len()
         );
         assert_eq!(wait_read(server_conn, payload.len()), payload);
@@ -277,7 +279,7 @@ mod tests {
         // server -> client
         let reply = b"pong from server";
         assert_eq!(
-            write_chunk(server_conn, reply).expect("server write"),
+            write_chunk(server_conn, Bytes::copy_from_slice(reply)).expect("server write"),
             reply.len()
         );
         assert_eq!(wait_read(client, reply.len()), reply);
