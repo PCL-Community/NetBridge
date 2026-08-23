@@ -257,9 +257,10 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_readChunk(
 /// [`bridge::read_chunk`] 的直写变体：native 把数据写进调用方提供的
 /// 直接缓冲区，避免每次调用分配新 jbyteArray。
 ///
-/// ABI 约定：JNI `GetDirectBufferAddress` 返回缓冲区基址、不感知
-/// position/limit，故从基址绝对偏移 0 开始写入（Java 侧保证传入视图的
-/// position 即写入起点）。返回值：读取字节数；0 = 暂无数据；
+/// ABI 约定：JNI `GetDirectBufferAddress` 返回传入缓冲区对象自身的基址，
+/// 不感知其 position/limit，故从该地址绝对偏移 0 开始写入——写入点由
+/// 视图基址决定（如 Netty 在目标偏移处建视图），与 position 无关，调用方
+/// 不得依赖 position 定位。返回值：读取字节数；0 = 暂无数据；
 /// -1 = 连接不存在/已关闭或参数非法（与 Java 侧声明一致）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_readChunkInto(

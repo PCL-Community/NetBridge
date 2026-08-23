@@ -12,8 +12,10 @@ use tokio::runtime::Runtime;
 
 use super::{ConnHandle, ServerHandle};
 
-static RUNTIME: LazyLock<Arc<Runtime>> =
-    LazyLock::new(|| Arc::new(Runtime::new().expect("failed to create tokio runtime")));
+// fallible 初始化：runtime 创建失败（线程/资源耗尽）缓存为 None，
+// 调用方返回错误而非 panic——panic 穿越 extern "system" 边界会 abort 宿主 JVM。
+static RUNTIME: LazyLock<Option<Arc<Runtime>>> =
+    LazyLock::new(|| Runtime::new().ok().map(Arc::new));
 static CONNS: LazyLock<DashMap<u64, ConnHandle>> = LazyLock::new(DashMap::new);
 static SERVERS: LazyLock<DashMap<u64, ServerHandle>> = LazyLock::new(DashMap::new);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -21,8 +23,8 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// 服务端当前活跃连接数（客户端连接不计数），用于并发上限防护。
 static ACTIVE_SERVER_CONNS: AtomicUsize = AtomicUsize::new(0);
 
-pub fn runtime() -> &'static Arc<Runtime> {
-    &RUNTIME
+pub fn runtime() -> Option<&'static Arc<Runtime>> {
+    RUNTIME.as_ref()
 }
 
 pub fn conns() -> &'static DashMap<u64, ConnHandle> {

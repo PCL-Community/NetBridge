@@ -20,12 +20,15 @@ use super::{
 /// 优先绑定 IPv6 双栈 `[::]:port`（IPV6_V6ONLY=false，同时接受 IPv4
 /// v4-mapped 连接）；系统禁用双栈时回退 IPv4 `0.0.0.0:port`。
 pub fn start_server(port: u16, max_connections: usize) -> Result<u64, String> {
-    let rt = runtime();
+    let Some(rt) = runtime() else {
+        // 日志由 JNI 导出层对 Err 统一上报，此处不重复。
+        return Err("tokio runtime unavailable".to_string());
+    };
     let server_config = quinn_plaintext::server_config();
     let (endpoint, actual_port) = {
         let _guard = rt.enter();
         // 优先 IPv6 双栈（接受 v4-mapped 连接）；失败回退 IPv4-only。
-        let v6_addr: std::net::SocketAddr = format!("[::]:{port}").parse().unwrap();
+        let v6_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
         match quinn::Endpoint::server(server_config.clone(), v6_addr) {
             Ok(ep) => {
                 let p = ep

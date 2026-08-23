@@ -18,7 +18,10 @@ use super::{ConnHandle, STATE_CONNECTING};
 /// EventLoop 上的全部 channel。失败路径置 FAILED、上报日志并就地移除
 /// 注册表条目（不依赖 Java close 兜底，消除 channel 早亡时的泄漏）。
 pub fn connect(host: &str, port: u16) -> Result<u64, String> {
-    let rt = runtime();
+    let Some(rt) = runtime() else {
+        // 日志由 JNI 导出层对 Err 统一上报，此处不重复。
+        return Err("tokio runtime unavailable".to_string());
+    };
     let (to_quic_tx, to_quic_rx) = mpsc::channel::<super::Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
@@ -45,10 +48,11 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
                 return;
             }
         };
+        // 无 parse().unwrap()：FFI 边界内禁 panic，构造函数天然不可失败。
         let bind_addr: SocketAddr = if addr.is_ipv6() {
-            "[::]:0".parse().unwrap()
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
         } else {
-            "0.0.0.0:0".parse().unwrap()
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
         };
         let mut endpoint = match quinn::Endpoint::client(bind_addr) {
             Ok(ep) => ep,
