@@ -34,7 +34,7 @@ class QuicServerTest {
         assertTrue(port > 0);
 
         long client = QuicNative.connect("127.0.0.1", port);
-        assertTrue(client > 0, "connect failed: " + QuicNative.lastError());
+        assertTrue(client > 0, "connect failed");
         Long connId = accepted.poll(10, TimeUnit.SECONDS);
         assertNotNull(connId, "handler never invoked");
         assertEquals(QuicNative.STATE_CONNECTED, QuicNative.connectionState(connId));

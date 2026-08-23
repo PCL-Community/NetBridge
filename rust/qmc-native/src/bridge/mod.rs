@@ -8,8 +8,15 @@ mod server;
 
 pub use client::connect;
 pub use connection::{close_connection, connection_state, read_chunk, write_chunk};
-pub use registry::{last_error, set_last_error};
+pub use registry::report_error;
 pub use server::{accept_connections, server_port, start_server, stop_server};
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::{Arc, Mutex};
+
+use bytes::Bytes;
+use tokio::sync::mpsc;
 
 /// 发往 QUIC 写任务的控制命令。
 #[derive(Debug)]
@@ -24,13 +31,6 @@ pub const STATE_CONNECTED: u32 = 1;
 pub const STATE_CLOSED: u32 = 2;
 pub const STATE_FAILED: u32 = 3;
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32};
-use std::sync::{Arc, Mutex};
-
-use bytes::Bytes;
-use tokio::sync::mpsc;
-
 /// 单条 QUIC 连接的 Java 侧句柄。
 pub struct ConnHandle {
     pub state: Arc<AtomicU32>,
@@ -43,6 +43,26 @@ pub struct ConnHandle {
     pub reported: AtomicBool,
 }
 
+impl ConnHandle {
+    /// 构造句柄：读侧 channel 与空残留队列包装进共享锁。
+    pub fn new(
+        state: Arc<AtomicU32>,
+        to_java_rx: mpsc::Receiver<Bytes>,
+        to_quic: mpsc::Sender<Command>,
+        server_id: Option<u64>,
+        reported: bool,
+    ) -> Self {
+        Self {
+            state,
+            to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
+            to_quic,
+            server_id,
+            reported: AtomicBool::new(reported),
+        }
+    }
+}
+
+/// 注册表中的服务端句柄。
 pub struct ServerHandle {
     pub endpoint: quinn::Endpoint,
     pub port: u16,

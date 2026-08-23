@@ -148,7 +148,7 @@ public class QuicChannel extends AbstractChannel {
             buf.getBytes(buf.readerIndex(), data);
             int accepted = QuicNative.writeChunk(connId, data);
             if (accepted < 0) {
-                in.remove(new IOException("quic write failed: " + QuicNative.lastError()));
+                in.remove(new IOException("quic write failed (conn " + connId + ", see qmc-native log)"));
                 // 统一经 close() 触发 channelInactive（此刻 connected 仍为 true，
                 // close 会正确发一次 inactive 并失败其余出站消息）。
                 unsafe().close(voidPromise());
@@ -232,7 +232,7 @@ public class QuicChannel extends AbstractChannel {
             stopPoller();
             ChannelPromise p = this.connectPromise;
             if (p != null && !p.isDone()) {
-                p.tryFailure(new ConnectException("quic handshake failed: " + QuicNative.lastError()));
+                p.tryFailure(new ConnectException("quic handshake failed (conn " + connId + ", see qmc-native log)"));
             }
             pipeline().fireExceptionCaught(new IOException("quic connection failed"));
             unsafe().close(voidPromise());
@@ -268,7 +268,7 @@ public class QuicChannel extends AbstractChannel {
         while (true) {
             byte[] data = QuicNative.readChunk(connId, MAX_READ_BYTES);
             if (data == null) {
-                pipeline().fireExceptionCaught(new IOException("quic read failed: " + QuicNative.lastError()));
+                pipeline().fireExceptionCaught(new IOException("quic read failed (conn " + connId + ", see qmc-native log)"));
                 break;
             }
             if (data.length == 0) {
@@ -324,7 +324,7 @@ public class QuicChannel extends AbstractChannel {
                 NativeLoader.load();
                 long id = QuicNative.connect(target.getHostString(), target.getPort());
                 if (id < 0) {
-                    promise.tryFailure(new ConnectException("quic connect failed: " + QuicNative.lastError()));
+                    promise.tryFailure(new ConnectException("quic connect failed, see qmc-native log"));
                     return;
                 }
                 connId = id;

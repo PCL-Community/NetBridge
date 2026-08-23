@@ -34,8 +34,8 @@ class QuicChannelTest {
     @BeforeAll
     static void setUp() {
         NativeLoader.load();
-        server = QuicNative.startServer(0);
-        assertTrue(server > 0, "startServer failed: " + QuicNative.lastError());
+        server = QuicNative.startServer(0, 256);
+        assertTrue(server > 0, "startServer failed");
         port = QuicNative.serverPort(server);
         assertTrue(port > 0);
         group = new NioEventLoopGroup(2);

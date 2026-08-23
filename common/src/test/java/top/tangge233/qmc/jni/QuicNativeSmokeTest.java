@@ -19,8 +19,7 @@ class QuicNativeSmokeTest {
             }
             Thread.sleep(5);
         }
-        fail("timeout waiting state " + want + ", got " + QuicNative.connectionState(conn)
-                + " err=" + QuicNative.lastError());
+        fail("timeout waiting state " + want + ", got " + QuicNative.connectionState(conn));
     }
 
     private static byte[] awaitRead(long conn, int want) throws InterruptedException {
@@ -32,7 +31,7 @@ class QuicNativeSmokeTest {
             }
             Thread.sleep(5);
         }
-        fail("timeout waiting read, err=" + QuicNative.lastError());
+        fail("timeout waiting read");
         throw new AssertionError("unreachable");
     }
 
@@ -45,7 +44,7 @@ class QuicNativeSmokeTest {
             }
             Thread.sleep(5);
         }
-        fail("server never accepted connection, err=" + QuicNative.lastError());
+        fail("server never accepted connection");
         throw new AssertionError("unreachable");
     }
 
@@ -72,14 +71,14 @@ class QuicNativeSmokeTest {
     void quicBridgeLoopbackRoundtrip() throws Exception {
         NativeLoader.load();
 
-        long server = QuicNative.startServer(0);
-        assertTrue(server > 0, "startServer failed: " + QuicNative.lastError());
+        long server = QuicNative.startServer(0, 256);
+        assertTrue(server > 0, "startServer failed");
         try {
             int port = QuicNative.serverPort(server);
             assertTrue(port > 0, "server port not bound");
 
             long client = QuicNative.connect("127.0.0.1", port);
-            assertTrue(client > 0, "connect failed: " + QuicNative.lastError());
+            assertTrue(client > 0, "connect failed");
             awaitState(client, QuicNative.STATE_CONNECTED);
 
             long serverConn = awaitServerConn(server);
@@ -88,13 +87,13 @@ class QuicNativeSmokeTest {
             // client -> server
             byte[] payload = "quic-mc hello over jni".getBytes(StandardCharsets.UTF_8);
             int n = QuicNative.writeChunk(client, payload);
-            assertEquals(payload.length, n, "client write: " + QuicNative.lastError());
+            assertEquals(payload.length, n, "client write");
             assertArrayEquals(payload, awaitRead(serverConn, payload.length));
 
             // server -> client
             byte[] reply = "pong via jni".getBytes(StandardCharsets.UTF_8);
             assertEquals(reply.length, QuicNative.writeChunk(serverConn, reply),
-                    "server write: " + QuicNative.lastError());
+                    "server write");
             assertArrayEquals(reply, awaitRead(client, reply.length));
 
             QuicNative.closeConnection(client);

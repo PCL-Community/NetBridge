@@ -5,7 +5,7 @@ package top.tangge233.qmc.jni;
  *
  * Rust 侧（quinn-plaintext）持有 UDP endpoint 与 tokio runtime；
  * Java 通过同步批量接口读写字节（ADR-0001 JNI 桥）。
- * 所有返回 -1 / null / 抛出异常的操作可用 {@link #lastError()} 取最近错误。
+ * Rust 侧错误即时输出到 stderr（由启动器重定向进 logs/latest.log）。
  */
 public final class QuicNative {
     public static final String RAW_FEATURE = "quic-raw";
@@ -27,8 +27,12 @@ public final class QuicNative {
 
     // ---- 服务端 ----
 
-    /** 启动 QUIC acceptor（端口 0 表示由系统分配）。返回服务端句柄；失败返回 -1。 */
-    public static native long startServer(int port);
+    /**
+     * 启动 QUIC acceptor（端口 0 表示由系统分配）。返回服务端句柄；失败返回 -1。
+     *
+     * @param maxConnections 服务端活跃连接上限，超限的新连接被拒绝
+     */
+    public static native long startServer(int port, int maxConnections);
 
     /** 查询服务端实际绑定端口；未知返回 -1。 */
     public static native int serverPort(long server);
@@ -56,13 +60,10 @@ public final class QuicNative {
      * 写入一段明文帧字节（批量桥）。
      *
      * @return 实际入队字节数：0 表示队列满/连接未就绪（调用方需缓冲重试，不可丢弃）；
-     *         -1 表示连接不存在或已关闭（用 lastError 查看原因）。
+     *         -1 表示连接不存在或已关闭。
      */
     public static native int writeChunk(long conn, byte[] data);
 
     /** 读取最多 maxBytes 字节；无数据返回空数组；连接不存在返回 null。 */
     public static native byte[] readChunk(long conn, int maxBytes);
-
-    /** 取走并清空最近一次错误；无错误返回 null。 */
-    public static native String lastError();
 }

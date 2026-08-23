@@ -24,6 +24,9 @@ public final class QuicServer {
     /** 可选系统属性：覆盖 QUIC 监听端口（优先级高于配置文件）。 */
     public static final String PROP_QUIC_PORT = "qmc.quicPort";
 
+    /** 服务端活跃连接数默认上限（配置项 {@code max_connection} 可覆盖）。 */
+    public static final int DEFAULT_MAX_CONNECTIONS = 256;
+
     private static volatile long serverHandle = -1;
     private static volatile int port = -1;
     private static volatile LongConsumer connectionHandler;
@@ -54,16 +57,16 @@ public final class QuicServer {
      * 启动 QUIC acceptor；已运行时幂等返回 true，失败记录日志并返回 false。
      *
      * 监听端口按 {@link #resolveListenPort} 的优先级解析，preferredPort
-     * （服务器 TCP 端口）仅作为最终回退值。
+     * （服务器 TCP 端口）作为 -1（跟随 TCP 端口）与非法值的落点。
      */
     public static synchronized boolean start(int preferredPort) {
         if (serverHandle != -1) {
             return true;
         }
         NativeLoader.load();
-        long handle = QuicNative.startServer(resolveListenPort(preferredPort));
+        long handle = QuicNative.startServer(resolveListenPort(preferredPort), resolveMaxConnections());
         if (handle < 0) {
-            LOGGER.warn("QUIC acceptor start failed: {}", QuicNative.lastError());
+            LOGGER.warn("QUIC acceptor start failed (see qmc-native log)");
             return false;
         }
         int actual = QuicNative.serverPort(handle);
@@ -76,16 +79,16 @@ public final class QuicServer {
 
     /**
      * 解析 QUIC 监听端口（可选配置项）：优先级为系统属性 {@code qmc.quicPort} >
-     * 配置目录下 {@code quic-mc/server.toml} 的 {@code port = <0-65535>}（0 表示
-     * 自动分配）> 回退到服务器 TCP 端口。非法/越界值告警并忽略，不阻断启动。
+     * 配置目录下 {@code quic-mc/server.toml} 的 {@code port}。端口语义：
+     * {@code -1} 跟随 Minecraft TCP 端口；{@code 0} 启动时随机分配；
+     * 1-65535 直接使用；其余非法值告警并按 -1（跟随 TCP 端口）处理。
      */
     private static int resolveListenPort(int tcpPort) {
         String sys = System.getProperty(PROP_QUIC_PORT);
         if (sys != null && !sys.isBlank()) {
             Integer parsed = parsePort(sys.trim(), "system property " + PROP_QUIC_PORT);
             if (parsed != null) {
-                LOGGER.info("QUIC listen port {} from system property {}", parsed, PROP_QUIC_PORT);
-                return parsed;
+                return applyPortSemantics(parsed, tcpPort, PROP_QUIC_PORT);
             }
         }
         Path configDir = QuicClient.configDir();
@@ -96,32 +99,70 @@ public final class QuicServer {
                     Long value = new Toml().read(file.toFile()).getLong("port");
                     if (value != null) {
                         int parsed = value.intValue();
-                        if (parsed >= 0 && parsed <= 65535) {
-                            LOGGER.info("QUIC listen port {} from {}", parsed, file);
-                            return parsed;
+                        if (parsed >= -1 && parsed <= 65535) {
+                            return applyPortSemantics(parsed, tcpPort, file.toString());
                         }
-                        LOGGER.warn("Invalid QUIC listen port {} from {}: out of range 0-65535", parsed, file);
+                        LOGGER.warn("Invalid QUIC listen port {} from {}: not -1/0/1-65535", parsed, file);
                     }
                 }
             } catch (Exception e) {
                 LOGGER.warn("Failed to read QUIC listen port from {}: {}", file, e.toString());
             }
         }
+        LOGGER.info("QUIC listen port unset; following Minecraft TCP port {}", tcpPort);
         return tcpPort;
     }
 
-    /** 解析并校验端口（0-65535，0 表示自动分配）；非法返回 null 并告警。 */
+    /** 应用端口语义：-1 跟随 TCP 端口，0 随机，1-65535 原样使用。 */
+    private static int applyPortSemantics(int parsed, int tcpPort, String source) {
+        if (parsed == -1) {
+            LOGGER.info("QUIC listen port -1 from {}: following Minecraft TCP port {}", source, tcpPort);
+            return tcpPort;
+        }
+        LOGGER.info("QUIC listen port {} from {}", parsed, source);
+        return parsed;
+    }
+
+    /** 解析并校验端口（-1 跟随 TCP、0 自动分配、1-65535 固定）；非法返回 null 并告警。 */
     private static Integer parsePort(String value, String source) {
         try {
             int port = Integer.parseInt(value);
-            if (port >= 0 && port <= 65535) {
+            if (port >= -1 && port <= 65535) {
                 return port;
             }
-            LOGGER.warn("Invalid QUIC listen port {} from {}: out of range 0-65535", value, source);
+            LOGGER.warn("Invalid QUIC listen port {} from {}: not -1/0/1-65535", value, source);
         } catch (NumberFormatException e) {
             LOGGER.warn("Invalid QUIC listen port '{}' from {}: not a number", value, source);
         }
         return null;
+    }
+
+    /**
+     * 解析服务端连接上限：配置文件 {@code quic-mc/server.toml} 的
+     * {@code max_connection}，默认 {@value #DEFAULT_MAX_CONNECTIONS}；
+     * 非法值（&lt;1）告警并回退默认。
+     */
+    private static int resolveMaxConnections() {
+        Path configDir = QuicClient.configDir();
+        if (configDir != null) {
+            Path file = configDir.resolve("server.toml");
+            try {
+                if (Files.exists(file)) {
+                    Long value = new Toml().read(file.toFile()).getLong("max_connection");
+                    if (value != null) {
+                        int parsed = value.intValue();
+                        if (parsed >= 1) {
+                            LOGGER.info("QUIC max connections {} from {}", parsed, file);
+                            return parsed;
+                        }
+                        LOGGER.warn("Invalid QUIC max connections {} from {}: must be >= 1", parsed, file);
+                    }
+                }
+            } catch (Exception e) {
+                LOGGER.warn("Failed to read QUIC max connections from {}: {}", file, e.toString());
+            }
+        }
+        return DEFAULT_MAX_CONNECTIONS;
     }
 
     /**

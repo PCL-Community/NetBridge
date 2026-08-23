@@ -1,23 +1,22 @@
 //! 客户端 QUIC 连接：异步握手，立即返回连接 id。
 
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use super::connection::run_connection;
-use super::registry::{allocate_id, conns, runtime};
+use super::registry::{allocate_id, conns, remove_conn, report_error, runtime};
 use super::{ConnHandle, STATE_CONNECTING};
 
 /// 客户端发起 QUIC 连接（异步握手，立即返回连接 id）。
 ///
 /// DNS 解析、UDP 绑定与握手全部在 runtime 任务内进行：本函数由 JNI 从
 /// Netty 事件循环线程调用，任何同步阻塞（DNS 可达数秒）都会冻结同一
-/// EventLoop 上的全部 channel。失败路径置 FAILED 后返回，注册表条目由
-/// close_connection 兜底清理。
+/// EventLoop 上的全部 channel。失败路径置 FAILED、上报日志并就地移除
+/// 注册表条目（不依赖 Java close 兜底，消除 channel 早亡时的泄漏）。
 pub fn connect(host: &str, port: u16) -> Result<u64, String> {
     let rt = runtime();
     let (to_quic_tx, to_quic_rx) = mpsc::channel::<super::Command>(4096);
@@ -26,13 +25,7 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
     let conn_id = allocate_id();
     conns().insert(
         conn_id,
-        ConnHandle {
-            state: state.clone(),
-            to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
-            to_quic: to_quic_tx.clone(),
-            server_id: None,
-            reported: std::sync::atomic::AtomicBool::new(true),
-        },
+        ConnHandle::new(state.clone(), to_java_rx, to_quic_tx.clone(), None, true),
     );
 
     let host = host.to_string();
@@ -43,12 +36,12 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
             Ok(mut addrs) => match addrs.next() {
                 Some(addr) => addr,
                 None => {
-                    fail(&state, format!("dns resolve failed: no address for {host}:{port}"));
+                    fail(conn_id, &state, format!("dns resolve failed: no address for {host}:{port}"));
                     return;
                 }
             },
             Err(e) => {
-                fail(&state, format!("dns resolve failed: {host}:{port}: {e}"));
+                fail(conn_id, &state, format!("dns resolve failed: {host}:{port}: {e}"));
                 return;
             }
         };
@@ -60,7 +53,7 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
         let mut endpoint = match quinn::Endpoint::client(bind_addr) {
             Ok(ep) => ep,
             Err(e) => {
-                fail(&state, format!("udp client: {e}"));
+                fail(conn_id, &state, format!("udp client: {e}"));
                 return;
             }
         };
@@ -70,19 +63,19 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
             Ok(connecting) => match connecting.await {
                 Ok(conn) => conn,
                 Err(e) => {
-                    fail(&state, format!("quic handshake to {addr}: {e}"));
+                    fail(conn_id, &state, format!("quic handshake to {addr}: {e}"));
                     return;
                 }
             },
             Err(e) => {
-                fail(&state, format!("quic connect to {addr}: {e}"));
+                fail(conn_id, &state, format!("quic connect to {addr}: {e}"));
                 return;
             }
         };
         let (send, recv) = match conn.open_bi().await {
             Ok(pair) => pair,
             Err(e) => {
-                fail(&state, format!("open_bi to {addr}: {e}"));
+                fail(conn_id, &state, format!("open_bi to {addr}: {e}"));
                 return;
             }
         };
@@ -95,8 +88,10 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
     Ok(conn_id)
 }
 
-/// 标记连接失败并记录最近错误；条目留给 Java poll 观察 FAILED 后关闭清理。
-fn fail(state: &Arc<AtomicU32>, msg: String) {
+/// 标记连接失败、上报日志并就地移除注册表条目（自清理，无泄漏窗口）。
+/// Java poll 随后观察到 UNKNOWN 并按连接不存在收尾。
+fn fail(conn_id: u64, state: &Arc<AtomicU32>, msg: String) {
     state.store(super::STATE_FAILED, Ordering::SeqCst);
-    super::registry::set_last_error(msg);
+    remove_conn(conn_id);
+    report_error(msg);
 }

@@ -1,20 +1,25 @@
 //! 服务端 QUIC acceptor：endpoint 生命周期与连接 accept。
 
-use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 
 use super::connection::run_connection;
-use super::registry::{allocate_id, conns, runtime, servers};
-use super::{Command, ConnHandle, STATE_CONNECTED, STATE_FAILED, ServerHandle};
+use super::registry::{active_server_conns, allocate_id, conns, runtime, servers};
+use super::{
+    Command, ConnHandle, STATE_CONNECTED, STATE_FAILED, ServerHandle,
+};
 
 /// 启动服务端 QUIC acceptor（端口 0 表示由系统分配）。
 ///
+/// `max_connections` 为服务端活跃连接上限：accept 阶段超限即丢弃
+/// Incoming（quinn 回 CONNECTION_REFUSED）。软限制——并发 accept 间
+/// 存在少量超发窗口，但足以阻断连接洪泛的资源耗尽。
+///
 /// 优先绑定 IPv6 双栈 `[::]:port`（IPV6_V6ONLY=false，同时接受 IPv4
 /// v4-mapped 连接）；系统禁用双栈时回退 IPv4 `0.0.0.0:port`。
-pub fn start_server(port: u16) -> Result<u64, String> {
+pub fn start_server(port: u16, max_connections: usize) -> Result<u64, String> {
     let rt = runtime();
     let server_config = quinn_plaintext::server_config();
     let (endpoint, actual_port) = {
@@ -58,8 +63,15 @@ pub fn start_server(port: u16) -> Result<u64, String> {
                 // endpoint 被 stopServer 关闭。
                 None => break,
             };
+            if active_server_conns() >= max_connections {
+                drop(incoming);
+                continue;
+            }
             rt.spawn(async move {
                 if let Ok(conn) = incoming.await {
+                    if !super::registry::track_server_conn_added(max_connections) {
+                        return;
+                    }
                     let reg = register_connection(server_id);
                     match conn.accept_bi().await {
                         Ok((send, recv)) => {
@@ -77,7 +89,7 @@ pub fn start_server(port: u16) -> Result<u64, String> {
                         }
                         Err(_) => {
                             reg.state.store(STATE_FAILED, Ordering::SeqCst);
-                            conns().remove(&reg.conn_id);
+                            super::registry::remove_conn(reg.conn_id);
                         }
                     }
                 }
@@ -130,23 +142,23 @@ pub struct Registered {
     pub to_quic_rx: tokio::sync::mpsc::Receiver<Command>,
     pub to_java_tx: tokio::sync::mpsc::Sender<Bytes>,
     pub to_quic_tx: tokio::sync::mpsc::Sender<Command>,
-    pub state: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    pub state: Arc<AtomicU32>,
 }
 
 fn register_connection(server_id: u64) -> Registered {
     let (to_quic_tx, to_quic_rx) = tokio::sync::mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<Bytes>(8192);
-    let state = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(STATE_CONNECTED));
+    let state = Arc::new(AtomicU32::new(STATE_CONNECTED));
     let conn_id = allocate_id();
     conns().insert(
         conn_id,
-        ConnHandle {
-            state: state.clone(),
-            to_java: Arc::new(std::sync::Mutex::new((to_java_rx, VecDeque::new()))),
-            to_quic: to_quic_tx.clone(),
-            server_id: Some(server_id),
-            reported: std::sync::atomic::AtomicBool::new(false),
-        },
+        ConnHandle::new(
+            state.clone(),
+            to_java_rx,
+            to_quic_tx.clone(),
+            Some(server_id),
+            false,
+        ),
     );
     Registered {
         conn_id,

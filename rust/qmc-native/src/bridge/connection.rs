@@ -5,13 +5,14 @@
 //! 复制进 `BytesMut`。写侧由 JNI 拷出的 `Vec<u8>` 零成本转 `Bytes`。
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc;
 
 use super::Command;
-use super::registry::conns;
+use super::registry::{conns, remove_conn};
 
 /// 查询连接状态；不存在返回 None（Java 映射为 UNKNOWN）。
 pub fn connection_state(conn: u64) -> Option<u32> {
@@ -30,10 +31,9 @@ pub fn close_connection(conn: u64) -> bool {
     drop(handle);
     let was = state.swap(super::STATE_CLOSED, Ordering::SeqCst);
     let ok = to_quic.try_send(Command::Close).is_ok();
-    // FAILED 且无存活任务收尾的连接（如客户端握手失败）：由 close 兜底
-    // 移除注册表条目，否则泄漏；有任务时其收尾 remove 为幂等 no-op。
+    // 防御性幂等清理：正常路径已由任务收尾/失败回调自清理。
     if was == super::STATE_FAILED {
-        conns().remove(&conn);
+        remove_conn(conn);
     }
     ok
 }
@@ -64,11 +64,33 @@ pub fn write_chunk(conn: u64, data: Bytes) -> Result<usize, String> {
 }
 
 /// 从队列取下一块：残留块优先，其后为 channel。
-fn pull(
+fn pull(rx: &mut mpsc::Receiver<Bytes>, pending: &mut VecDeque<Bytes>) -> Option<Bytes> {
+    pending.pop_front().or_else(|| rx.try_recv().ok())
+}
+
+/// 多块拼接：唯一不可避免的重组拷贝（JNI 边界需要连续内存）。
+/// 超出 max_bytes 的尾部以共享视图切回 pending。
+fn reassemble(
+    first: &Bytes,
+    mut next: Option<Bytes>,
     rx: &mut mpsc::Receiver<Bytes>,
     pending: &mut VecDeque<Bytes>,
-) -> Option<Bytes> {
-    pending.pop_front().or_else(|| rx.try_recv().ok())
+    max_bytes: usize,
+) -> Bytes {
+    let mut out = BytesMut::with_capacity(max_bytes);
+    out.extend_from_slice(first);
+    while out.len() < max_bytes {
+        let Some(mut chunk) = next.take().or_else(|| pull(rx, pending)) else {
+            break;
+        };
+        if out.len() + chunk.len() > max_bytes {
+            let cut = max_bytes - out.len();
+            pending.push_front(chunk.slice(cut..));
+            chunk = chunk.slice(..cut);
+        }
+        out.extend_from_slice(&chunk);
+    }
+    out.freeze()
 }
 
 /// 读取最多 max_bytes 字节；无数据时返回空 Bytes。
@@ -99,25 +121,9 @@ pub fn read_chunk(conn: u64, max_bytes: usize) -> Result<Bytes, String> {
     }
 
     match pull(rx, pending) {
+        // 仅此一块且不超长：整块直返，零重组。
         None => Ok(first),
-        Some(second) => {
-            let mut out = BytesMut::with_capacity(max_bytes);
-            out.extend_from_slice(&first);
-            drop(first);
-            let mut next = Some(second);
-            while out.len() < max_bytes {
-                let Some(mut chunk) = next.take().or_else(|| pull(rx, pending)) else {
-                    break;
-                };
-                if out.len() + chunk.len() > max_bytes {
-                    let cut = max_bytes - out.len();
-                    pending.push_front(chunk.slice(cut..));
-                    chunk = chunk.slice(..cut);
-                }
-                out.extend_from_slice(&chunk);
-            }
-            Ok(out.freeze())
-        }
+        Some(second) => Ok(reassemble(&first, Some(second), rx, pending, max_bytes)),
     }
 }
 
@@ -135,17 +141,24 @@ pub async fn run_connection(
     mut to_quic_rx: mpsc::Receiver<Command>,
     to_java_tx: mpsc::Sender<Bytes>,
     to_quic_tx: mpsc::Sender<Command>,
-    state: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    state: Arc<AtomicU32>,
 ) {
     let reader = {
         let to_quic_tx = to_quic_tx.clone();
         tokio::spawn(async move {
+            // 防护：quinn 不应产出空块；连续异常则终止读循环交由收尾。
+            let mut empty_streak = 0u32;
             loop {
                 match recv.read_chunk(65536, true).await {
                     Ok(Some(chunk)) => {
                         if chunk.bytes.is_empty() {
+                            empty_streak = empty_streak.saturating_add(1);
+                            if empty_streak >= 16 {
+                                break;
+                            }
                             continue;
                         }
+                        empty_streak = 0;
                         if to_java_tx.send(chunk.bytes).await.is_err() {
                             break;
                         }
@@ -188,5 +201,5 @@ pub async fn run_connection(
     reader.abort();
     let _ = reader.await;
     conn.close(0u32.into(), b"qmc close");
-    conns().remove(&conn_id);
+    remove_conn(conn_id);
 }
