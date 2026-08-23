@@ -8,10 +8,11 @@ mod server;
 
 pub use client::connect;
 pub use connection::{close_connection, connection_state, read_chunk, write_chunk};
-pub use registry::report_error;
+pub use registry::{conn_remote_addr, report_error};
 pub use server::{accept_connections, server_port, start_server, stop_server};
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 
@@ -41,6 +42,9 @@ pub struct ConnHandle {
     pub server_id: Option<u64>,
     /// 服务端连接是否已被 Java 通过 acceptConnections 取走。
     pub reported: AtomicBool,
+    /// 服务端连接真实对端地址（Java 侧 ban/限速等 IP 管控）；
+    /// 客户端连接在 DNS 解析前注册，此处为 None。
+    pub remote_addr: Option<SocketAddr>,
 }
 
 impl ConnHandle {
@@ -51,6 +55,7 @@ impl ConnHandle {
         to_quic: mpsc::Sender<Command>,
         server_id: Option<u64>,
         reported: bool,
+        remote_addr: Option<SocketAddr>,
     ) -> Self {
         Self {
             state,
@@ -58,6 +63,7 @@ impl ConnHandle {
             to_quic,
             server_id,
             reported: AtomicBool::new(reported),
+            remote_addr,
         }
     }
 }

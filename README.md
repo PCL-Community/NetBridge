@@ -36,6 +36,7 @@ Minecraft already has its own encrypted streams, and this mod just wants to take
 Add/Edit the file at `config/quic-mc/server.toml`. The file only has one config section:
 
 ```toml
+[quic]
 port = 25566
 ```
 

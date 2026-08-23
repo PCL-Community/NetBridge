@@ -52,7 +52,7 @@ class QuicServerTest {
     void keepsExistingConfigFile(@TempDir Path dir) throws IOException {
         QuicClient.useConfigFile(dir.resolve("client.toml"));
         Files.writeString(dir.resolve("server.toml"),
-                "# my tuning\nport = 30000\nmax_connection = 8\n");
+                "# my tuning\n[quic]\nport = 30000\nmax_connection = 8\n");
 
         QuicServerConfig.ServerConfig config = QuicServerConfig.load();
 

@@ -58,12 +58,17 @@ public final class NativeLoader {
         loaded = true;
     }
 
-    /** 优先 system load，失败后 fallback classpath；测试与运行时通用。 */
+    /**
+     * 优先 classpath 内置库（打包进 jar 的可信版本），失败回退
+     * java.library.path（Gradle test 用 -Djava.library.path）。
+     * 先加载 system 会优先命中库路径中被移植的同名文件（二进制种植面），
+     * 内置版本不可被外部替换。
+     */
     public static synchronized void load() {
         try {
-            loadSystem();
-        } catch (UnsatisfiedLinkError e) {
             loadFromClasspath();
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            loadSystem();
         }
     }
 }

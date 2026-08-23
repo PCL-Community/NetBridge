@@ -3,6 +3,7 @@ package top.tangge233.qmc.server;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import com.electronwill.nightconfig.core.file.CommentedFileConfig;
+import io.netty.util.NetUtil;
 import top.tangge233.qmc.net.QuicClient;
 
 /**
@@ -24,7 +25,7 @@ final class QuicServerConfig {
     private QuicServerConfig() {}
 
     /** {@code server.toml} 解析结果；null 字段表示未配置/非法，走内置默认。 */
-    record ServerConfig(Integer port, Integer maxConnection) {}
+    record ServerConfig(Integer port, Integer maxConnection, String bind) {}
 
     /**
      * 读取 {@code quic-mc/server.toml}；文件不存在时从 jar 内置模板
@@ -35,7 +36,7 @@ final class QuicServerConfig {
     static ServerConfig load() {
         Path dir = QuicClient.configDir();
         if (dir == null) {
-            return new ServerConfig(null, null);
+            return new ServerConfig(null, null, null);
         }
         Path file = dir.resolve("server.toml");
         try {
@@ -45,13 +46,15 @@ final class QuicServerConfig {
                     .defaultResource("/quic-mc/server-default.toml")
                     .build()) {
                 config.load();
-                Integer port = config.get("port");
-                Integer max = config.get("max_connection");
-                return new ServerConfig(port, max);
+                // NightConfig dotted path 读 [quic] 表。
+                Integer port = config.get("quic.port");
+                Integer max = config.get("quic.max_connection");
+                String bind = config.get("quic.bind");
+                return new ServerConfig(port, max, bind);
             }
         } catch (Exception e) {
             QuicServer.LOGGER.warn("Failed to load QUIC server config {}: {}", file, e.toString());
-            return new ServerConfig(null, null);
+            return new ServerConfig(null, null, null);
         }
     }
 
@@ -101,6 +104,25 @@ final class QuicServerConfig {
         } catch (NumberFormatException e) {
             QuicServer.LOGGER.warn("Invalid QUIC listen port '{}' from {}: not a number", value, source);
         }
+        return null;
+    }
+
+    /**
+     * 解析监听地址：server.toml 的 {@code bind} 优先，其次 Minecraft
+     * {@code server-ip}；均空返回 null（Rust 侧默认全部网卡）。
+     * 仅接受 IP 字面量（不做 DNS），非法告警回退默认。
+     */
+    static String resolveBind(String configured, String serverIp) {
+        String value = (configured != null && !configured.isBlank()) ? configured : serverIp;
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String v = value.trim();
+        if (NetUtil.isValidIpV4Address(v) || NetUtil.isValidIpV6Address(v)) {
+            return v;
+        }
+        QuicServer.LOGGER.warn(
+                "Invalid QUIC bind address '{}': must be an IP literal (e.g. 0.0.0.0, ::1); using all interfaces", v);
         return null;
     }
 

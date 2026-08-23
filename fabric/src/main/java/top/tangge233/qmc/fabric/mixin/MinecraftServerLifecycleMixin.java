@@ -19,7 +19,7 @@ public class MinecraftServerLifecycleMixin {
     private void qmc$startAcceptor(CallbackInfo ci) {
         MinecraftServer self = (MinecraftServer) (Object) this;
         QuicServer.setConnectionHandler(connId -> QuicServerTransport.adopt(self, connId));
-        QuicServer.start(self.getPort());
+        QuicServer.start(self.getPort(), self.getLocalIp());
     }
 
     /**

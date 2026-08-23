@@ -41,12 +41,12 @@ fn wait_disconnected(conn: u64) {
 fn wait_read(conn: u64, want: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-            // Edition 2024 let-chain：读取满足长度即返回。
-            if let Ok(data) = read_chunk(conn, 65536)
-                && data.len() >= want
-            {
-                return data.to_vec();
-            }
+        // Edition 2024 let-chain：读取满足长度即返回。
+        if let Ok(data) = read_chunk(conn, 65536)
+            && data.len() >= want
+        {
+            return data.to_vec();
+        }
         assert!(Instant::now() < deadline, "timeout waiting for read");
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -61,7 +61,7 @@ fn abi_constants() {
 
 #[test]
 fn bridge_loopback_roundtrip() {
-    let server = start_server(0, 256).expect("start server");
+    let server = start_server(0, 256, None).expect("start server");
     let port = server_port(server).expect("server port");
     let client = connect("127.0.0.1", port).expect("connect");
     wait_state(client, STATE_CONNECTED);
@@ -108,7 +108,7 @@ fn bridge_loopback_roundtrip() {
 /// （回归保护：生产中服务端拒绝/异常关闭连接时客户端不能挂起。）
 #[test]
 fn peer_close_propagates_to_client() {
-    let server = start_server(0, 256).expect("start server");
+    let server = start_server(0, 256, None).expect("start server");
     let port = server_port(server).expect("server port");
     let client = connect("127.0.0.1", port).expect("connect");
     wait_state(client, STATE_CONNECTED);
@@ -140,8 +140,8 @@ async fn plaintext_bidi_echo() {
     use quinn::Endpoint;
 
     let server_config = quinn_plaintext::server_config();
-    let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
-        .expect("server endpoint");
+    let server =
+        Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
     let server_addr = server.local_addr().expect("server local addr");
 
     let mut client = Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");

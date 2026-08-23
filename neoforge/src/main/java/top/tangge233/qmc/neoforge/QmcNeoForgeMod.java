@@ -32,7 +32,7 @@ public class QmcNeoForgeMod {
         NeoForge.EVENT_BUS.addListener((ServerStartedEvent e) -> {
             var server = e.getServer();
             QuicServer.setConnectionHandler(connId -> QuicServerTransport.adopt(server, connId));
-            QuicServer.start(server.getPort());
+            QuicServer.start(server.getPort(), server.getLocalIp());
         });
         NeoForge.EVENT_BUS.addListener((ServerStoppingEvent e) -> {
             QuicServer.setConnectionHandler(null);

@@ -11,6 +11,7 @@ import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.FastThreadLocal;
 import java.io.IOException;
 import java.net.ConnectException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
@@ -89,8 +90,35 @@ public class QuicChannel extends AbstractChannel {
         QuicChannel channel = new QuicChannel();
         channel.connId = connId;
         channel.connected = true;
-        channel.remoteAddress = ADOPT_REMOTE_ADDRESS;
+        channel.remoteAddress = resolveRemoteAddress(connId);
         return channel;
+    }
+
+    /**
+     * 取连接真实对端地址（IP 管控：ban-ip/限速/审计）；
+     * 取不到或非法时回退 0.0.0.0 哨兵。
+     */
+    private static InetSocketAddress resolveRemoteAddress(long connId) {
+        String s = QuicNative.remoteAddress(connId);
+        if (s == null) {
+            return ADOPT_REMOTE_ADDRESS;
+        }
+        int idx = s.lastIndexOf(':');
+        if (idx <= 0 || idx == s.length() - 1) {
+            return ADOPT_REMOTE_ADDRESS;
+        }
+        try {
+            String host = s.substring(0, idx);
+            if (host.startsWith("[") && host.endsWith("]")) {
+                host = host.substring(1, host.length() - 1);
+            }
+            int port = Integer.parseInt(s.substring(idx + 1));
+            // 字面量 IP，getByName 不触发 DNS。
+            return new InetSocketAddress(InetAddress.getByName(host), port);
+        } catch (IOException | IllegalArgumentException e) {
+            QuicClient.LOGGER.warn("Invalid QUIC remote address '{}' from native (conn {})", s, connId);
+            return ADOPT_REMOTE_ADDRESS;
+        }
     }
 
     @Override

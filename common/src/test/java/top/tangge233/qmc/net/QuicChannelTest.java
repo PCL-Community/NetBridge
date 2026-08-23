@@ -34,7 +34,7 @@ class QuicChannelTest {
     @BeforeAll
     static void setUp() {
         NativeLoader.load();
-        server = QuicNative.startServer(0, 256);
+        server = QuicNative.startServer(0, 256, "");
         assertTrue(server > 0, "startServer failed");
         port = QuicNative.serverPort(server);
         assertTrue(port > 0);

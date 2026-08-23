@@ -51,6 +51,15 @@ public final class QuicServer {
      * （服务器 TCP 端口）作为 -1（跟随 TCP 端口）与非法值的落点。
      */
     public static synchronized boolean start(int preferredPort) {
+        return start(preferredPort, null);
+    }
+
+    /**
+     * 启动 QUIC acceptor 并指定监听地址（{@code bindIp} 为 Minecraft
+     * {@code server-ip}；空则回退 server.toml 的 {@code bind}，再回退全部网卡）。
+     * 绑定地址仅限 IP 字面量，避免 QUIC 端口暴露到非预期网卡。
+     */
+    public static synchronized boolean start(int preferredPort, String bindIp) {
         if (serverHandle != -1) {
             return true;
         }
@@ -58,7 +67,8 @@ public final class QuicServer {
         QuicServerConfig.ServerConfig config = QuicServerConfig.load();
         long handle = QuicNative.startServer(
                 QuicServerConfig.resolveListenPort(config.port(), preferredPort),
-                QuicServerConfig.resolveMaxConnections(config.maxConnection()));
+                QuicServerConfig.resolveMaxConnections(config.maxConnection()),
+                QuicServerConfig.resolveBind(config.bind(), bindIp));
         if (handle < 0) {
             LOGGER.warn("QUIC acceptor start failed (see qmc-native log)");
             return false;

@@ -66,6 +66,14 @@ pub fn remove_conn(conn_id: u64) -> Option<ConnHandle> {
     })
 }
 
+/// 查询连接的对端地址（"ip:port"）；客户端连接或不存在返回 None。
+pub fn conn_remote_addr(conn: u64) -> Option<String> {
+    conns()
+        .get(&conn)
+        .and_then(|h| h.remote_addr)
+        .map(|a| a.to_string())
+}
+
 /// 错误即时上报：stderr 由 Minecraft 启动器重定向进 logs/latest.log。
 pub fn report_error(msg: String) {
     eprintln!("[qmc-native] error: {msg}");

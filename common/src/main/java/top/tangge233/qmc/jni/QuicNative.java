@@ -33,11 +33,15 @@ public final class QuicNative {
      * 启动 QUIC acceptor（端口 0 表示由系统分配）。返回服务端句柄；失败返回 -1。
      *
      * @param maxConnections 服务端活跃连接上限，超限的新连接被拒绝
+     * @param bindHost       监听地址 IP 字面量；null/空 = 默认所有网卡
      */
-    public static native long startServer(int port, int maxConnections);
+    public static native long startServer(int port, int maxConnections, String bindHost);
 
     /** 查询服务端实际绑定端口；未知返回 -1。 */
     public static native int serverPort(long server);
+
+    /** 查询服务端收养连接的对端地址（"ip:port"）；客户端连接或不存在返回 null。 */
+    public static native String remoteAddress(long conn);
 
     /** 取回服务端尚未上报的新连接 id 列表（每次调用后不会重复返回）。 */
     public static native long[] acceptConnections(long server);

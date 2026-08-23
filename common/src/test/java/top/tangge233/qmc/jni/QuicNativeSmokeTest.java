@@ -71,7 +71,7 @@ class QuicNativeSmokeTest {
     void quicBridgeLoopbackRoundtrip() throws Exception {
         NativeLoader.load();
 
-        long server = QuicNative.startServer(0, 256);
+        long server = QuicNative.startServer(0, 256, "");
         assertTrue(server > 0, "startServer failed");
         try {
             int port = QuicNative.serverPort(server);

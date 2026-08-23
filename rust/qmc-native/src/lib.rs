@@ -71,10 +71,11 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_rawFeature(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_startServer(
-    _env: EnvUnowned,
+    mut env: EnvUnowned,
     _class: JClass,
     port: jint,
     max_connections: jint,
+    host: JString,
 ) -> jlong {
     let Some(port) = valid_port(port) else {
         bridge::report_error(format!("invalid listen port {port}"));
@@ -84,7 +85,29 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_startServer(
         bridge::report_error(format!("invalid max connections {max_connections}"));
         return -1;
     }
-    match bridge::start_server(port, max_connections as usize) {
+    // bind 为空/null 时用默认地址族（[::] 双栈 → 0.0.0.0），否则仅绑定指定 IP。
+    let host = resolve_default(
+        env.with_env(|env| {
+            if host.is_null() {
+                Ok::<_, Error>(String::new())
+            } else {
+                host.try_to_string(env)
+            }
+        }),
+        "startServer",
+        || String::new(),
+    );
+    let bind = match host.trim() {
+        "" => None,
+        s => match s.parse::<std::net::IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(e) => {
+                bridge::report_error(format!("invalid bind address '{s}': {e}"));
+                return -1;
+            }
+        },
+    };
+    match bridge::start_server(port, max_connections as usize, bind) {
         Ok(id) => id as jlong,
         Err(msg) => {
             bridge::report_error(msg);
@@ -102,6 +125,23 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_serverPort(
     bridge::server_port(server as u64)
         .map(|p| p as jint)
         .unwrap_or(-1)
+}
+
+/// 查询连接对端地址（"ip:port"）；客户端连接或不存在返回 null。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_remoteAddress(
+    mut env: EnvUnowned,
+    _class: JClass,
+    conn: jlong,
+) -> jstring {
+    let Some(addr) = bridge::conn_remote_addr(conn as u64) else {
+        return std::ptr::null_mut();
+    };
+    resolve_default(
+        env.with_env(|env| Ok(env.new_string(addr)?.into_raw())),
+        "remoteAddress",
+        std::ptr::null_mut,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -281,9 +321,7 @@ pub extern "system" fn Java_top_tangge233_qmc_jni_QuicNative_readChunkInto(
             let cap = env.get_direct_buffer_capacity(&buffer)?;
             // SAFETY: addr 指向 JVM 直接缓冲区内存且 cap 为其可写字节数；
             // JNI 约定该指针仅在本次原生调用内使用。
-            Ok::<_, Error>(Some(unsafe {
-                std::slice::from_raw_parts_mut(addr, cap)
-            }))
+            Ok::<_, Error>(Some(unsafe { std::slice::from_raw_parts_mut(addr, cap) }))
         }),
         "readChunkInto",
         || None,

@@ -5,8 +5,8 @@
 //! 复制进 `BytesMut`。写侧由 JNI 拷出的 `Vec<u8>` 零成本转 `Bytes`。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::mpsc;
@@ -16,9 +16,7 @@ use super::registry::{conns, remove_conn};
 
 /// 查询连接状态；不存在返回 None（Java 映射为 UNKNOWN）。
 pub fn connection_state(conn: u64) -> Option<u32> {
-    conns()
-        .get(&conn)
-        .map(|h| h.state.load(Ordering::SeqCst))
+    conns().get(&conn).map(|h| h.state.load(Ordering::SeqCst))
 }
 
 /// 关闭连接（优雅结束发送侧，等待 QUIC 任务收尾）。
@@ -174,6 +172,11 @@ pub async fn run_connection(
     };
 
     loop {
+        // Close 命令可能因写队列满丢失，或状态已由外部置 CLOSED；此处兜底收尾。
+        if state.load(Ordering::SeqCst) == super::STATE_CLOSED {
+            let _ = send.finish();
+            break;
+        }
         tokio::select! {
             cmd = to_quic_rx.recv() => match cmd {
                 Some(Command::Write(bytes)) => {

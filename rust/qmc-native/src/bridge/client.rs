@@ -1,8 +1,8 @@
 //! 客户端 QUIC 连接：异步握手，立即返回连接 id。
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -28,7 +28,14 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
     let conn_id = allocate_id();
     conns().insert(
         conn_id,
-        ConnHandle::new(state.clone(), to_java_rx, to_quic_tx.clone(), None, true),
+        ConnHandle::new(
+            state.clone(),
+            to_java_rx,
+            to_quic_tx.clone(),
+            None,
+            true,
+            None,
+        ),
     );
 
     let host = host.to_string();
@@ -39,12 +46,20 @@ pub fn connect(host: &str, port: u16) -> Result<u64, String> {
             Ok(mut addrs) => match addrs.next() {
                 Some(addr) => addr,
                 None => {
-                    fail(conn_id, &state, format!("dns resolve failed: no address for {host}:{port}"));
+                    fail(
+                        conn_id,
+                        &state,
+                        format!("dns resolve failed: no address for {host}:{port}"),
+                    );
                     return;
                 }
             },
             Err(e) => {
-                fail(conn_id, &state, format!("dns resolve failed: {host}:{port}: {e}"));
+                fail(
+                    conn_id,
+                    &state,
+                    format!("dns resolve failed: {host}:{port}: {e}"),
+                );
                 return;
             }
         };
