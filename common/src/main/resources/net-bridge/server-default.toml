@@ -1,0 +1,13 @@
+# net-bridge 服务端配置（首次启动自动生成本文件，可直接编辑）
+
+[quic]
+
+# QUIC 监听端口：-1 跟随 Minecraft TCP 端口；0 随机分配；1-65535 固定端口
+port = -1
+
+# QUIC 监听地址：空 = 所有网卡（默认）；IP 字面量（如 "0.0.0.0"、"::1"）限定单网卡。
+# 未设置时回退 server.properties 的 server-ip。
+bind = ""
+
+# 服务端最大并发连接数（超限的新连接将被拒绝）
+max_connection = 256

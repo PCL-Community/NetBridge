@@ -18,16 +18,16 @@ def nativeProfile = (findProperty('nativeProfile') ?: 'debug').toString()
 if (!(nativeProfile in ['debug', 'release'])) {
     throw new GradleException("nativeProfile must be debug or release, got: ${nativeProfile}")
 }
-def cargoDir = file('rust/qmc-native')
+def cargoDir = file('rust/net-bridge-native')
 def cdylibDir = file("$buildDir/native")
 
 // 按当前 OS/架构选择 cargo 产出的 cdylib 文件名与 jar 内子目录
 // （与 NativeLoader.platformDir()/nativeResourceName() 一致）。
 def osName = System.getProperty('os.name', '').toLowerCase()
 def archName = System.getProperty('os.arch', '').toLowerCase()
-def cdylibName = osName.contains('win') ? 'qmc_native.dll'
-        : (osName.contains('mac') || osName.contains('darwin')) ? 'libqmc_native.dylib'
-        : 'libqmc_native.so'
+def cdylibName = osName.contains('win') ? 'net_bridge_native.dll'
+        : (osName.contains('mac') || osName.contains('darwin')) ? 'libnet_bridge_native.dylib'
+        : 'libnet_bridge_native.so'
 def nativeOsDir = osName.contains('win') ? 'windows'
         : (osName.contains('mac') || osName.contains('darwin')) ? 'macos' : 'linux'
 def nativeArchDir = (archName in ['x86_64', 'amd64']) ? 'x86_64' : (archName in ['aarch64', 'arm64']) ? 'aarch64' : archName
@@ -52,7 +52,7 @@ tasks.register('buildCdylib') {
         if (code != 0) {
             throw new GradleException("cargo build failed with exit code " + code)
         }
-        def src = file("rust/qmc-native/target/${nativeProfile}/${cdylibName}")
+        def src = file("rust/net-bridge-native/target/${nativeProfile}/${cdylibName}")
         if (!src.exists()) {
             throw new GradleException("Rust cdylib not found after cargo build: ${src}")
         }
@@ -81,8 +81,8 @@ tasks.register('checkSyncedCopies') {
     description = 'Verifies fabric/neoforge source copies stay in sync (ADR-0006).'
     doLast {
         def base = [
-            fabric  : file('fabric/src/main/java/top/tangge233/qmc/fabric'),
-            neoforge: file('neoforge/src/main/java/top/tangge233/qmc/neoforge'),
+            fabric  : file('fabric/src/main/java/top/tangge233/netbridge/fabric'),
+            neoforge: file('neoforge/src/main/java/top/tangge233/netbridge/neoforge'),
         ]
         def normalize = { f -> f.readLines().findAll {
             def t = it.trim()
@@ -118,12 +118,12 @@ tasks.register('assembleAll') {
     dependsOn ':fabric:remapJar'
     doLast {
         copy {
-            from project(':neoforge').layout.buildDirectory.file("libs/qmc-neoforge-${modVersion}.jar")
+            from project(':neoforge').layout.buildDirectory.file("libs/net-bridge-neoforge-${modVersion}.jar")
             into rootLibs
         }
         copy {
             from project(':fabric').tasks.named('remapJar').flatMap { it.archiveFile }
-            rename { "qmc-fabric-${modVersion}.jar" }
+            rename { "net-bridge-fabric-${modVersion}.jar" }
             into rootLibs
         }
     }

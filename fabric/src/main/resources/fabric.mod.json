@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "id": "qmc",
+  "id": "net-bridge",
   "version": "${version}",
-  "name": "quic-mc (Fabric)",
+  "name": "net-bridge (Fabric)",
   "description": "QUIC transport capability for Minecraft (quinn-plaintext, transparent byte stream replacement).",
   "environment": "*",
   "entrypoints": {
     "main": [
-      "top.tangge233.qmc.fabric.QmcFabricMod"
+      "top.tangge233.netbridge.fabric.NetBridgeFabricMod"
     ]
   },
   "mixins": [
-    "qmc.mixins.json"
+    "net-bridge.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=0.15.0",

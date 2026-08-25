@@ -20,7 +20,7 @@ Minecraft 客户端与服务端默认使用 TCP。我们希望：
 - `quinn-plaintext` 特性确认：
   - 无 TLS、无证书、无 TOFU、无指纹；
   - 0.2.0+ 自带 checksum（防随机损坏，**非**认证 MAC）；
-  - **不与我们之外的 QUIC 实现互通**——仅 quic-mc 两端可用，符合定位；
+  - **不与我们之外的 QUIC 实现互通**——仅 net-bridge 两端可用，符合定位；
   - 官方注明“仅当底层已有加密（如 WireGuard）时推荐”——本项目在初期接受该风险（见安全边界）。
 - 客户端：先经 TCP Ping（ADR-0002）识别服务器是否支持 QUIC，再按模式选择 TCP/QUIC/fallback。
 - 服务端：保留原版 TCP acceptor（Ping/登录/原版客户端），另开 UDP QUIC acceptor 并行接受。
@@ -53,7 +53,7 @@ Minecraft 客户端与服务端默认使用 TCP。我们希望：
 ## 后果
 
 - 正向：可行性快、对普通 mod 透明、保留原版互操作、QUIC 收益（多路复用/抗队头阻塞/连接迁移）仍可得。
-- 负向：明文会话仅限可信网络；QUIC 仅两端都安装 quic-mc 时可用；无加密/压缩能力。
+- 负向：明文会话仅限可信网络；QUIC 仅两端都安装 net-bridge 时可用；无加密/压缩能力。
 
 ## 待办
 

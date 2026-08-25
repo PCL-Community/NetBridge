@@ -39,7 +39,7 @@ neoForge {
     version = neoForgeVersion
     validateAccessTransformers = true
     mods {
-        qmc {
+        netbridge {
             sourceSet sourceSets.main
         }
     }
@@ -49,7 +49,7 @@ def cdylibDir = rootProject.layout.buildDirectory.dir('native')
 
 tasks.register('jarNeoForge', Jar) {
     dependsOn(rootProject.tasks.named('buildCdylib'))
-    archiveFileName = "qmc-neoforge-${modVersion}.jar"
+    archiveFileName = "net-bridge-neoforge-${modVersion}.jar"
     from(sourceSets.main.output)
     from(project(':common').sourceSets.main.output)
     from(cdylibDir) { into 'native/' }

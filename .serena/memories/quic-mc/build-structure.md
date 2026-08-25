@@ -1,4 +1,4 @@
-# quic-mc 目录/构建约定（2026-08-21 同步）
+# net-bridge 目录/构建约定（2026-08-21 同步）
 
 - 根 Gradle 单工程多 sourceSet：
   - `java/qmc-common`：纯 common，无 mod loader 依赖。

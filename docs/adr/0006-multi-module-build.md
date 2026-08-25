@@ -29,8 +29,8 @@
 1. **共享逻辑按平台复制而非共享字节码**（"下沉到各自平台模块"）：
    原 `qmc-mc` 中引用 Minecraft 类的代码（`QuicClientTransport`、
    `ConnectionMixin`、status mixin 等）在 `:neoforge` 与 `:fabric`
-   各有一份源码副本（包名分别为 `top.tangge233.qmc.neoforge.mc` /
-   `top.tangge233.qmc.fabric.mc`）。两者均以 Mojang 映射编写；
+   各有一份源码副本（包名分别为 `top.tangge233.netbridge.neoforge.mc` /
+   `top.tangge233.netbridge.fabric.mc`）。两者均以 Mojang 映射编写；
    Fabric 侧由 Loom 在 `remapJar` 时自动重映射到 intermediary。
    不追求单一共享源码集——跨映射体系的字节码共享是本次重构要消灭的问题本身。
 2. **`:fabric` 使用完整 Fabric Loom**：提供 minecraft 依赖、
@@ -38,8 +38,8 @@
    多模块构建，但各只应用于自己的子项目。
 3. **Rust cdylib 构建留在根项目**（`buildCdylib` 任务），
    `:common` 的测试与两个平台 jar 均依赖其产物。
-4. **产物聚合**：根任务 `assembleAll` 将 `qmc-neoforge-<v>.jar` 与
-   `qmc-fabric-<v>.jar` 收集到根 `build/libs/`，保持分发习惯不变。
+4. **产物聚合**：根任务 `assembleAll` 将 `net-bridge-neoforge-<v>.jar` 与
+   `net-bridge-fabric-<v>.jar` 收集到根 `build/libs/`，保持分发习惯不变。
 5. **版本锁定约定**：NeoForge（`neoForge.version = 21.1.183`，即 MC 1.21.1）
    与 Fabric（`minecraft_version=1.21.1`）必须锁定同一 Minecraft 版本。
    升级 MC 时需同步修改 `gradle.properties` 中两处版本并回归测试双平台。

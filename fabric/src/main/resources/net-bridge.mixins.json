@@ -1,0 +1,17 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "top.tangge233.netbridge.fabric.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "StatusResponseWriteMixin",
+    "MinecraftServerLifecycleMixin",
+    "ConnectionMixin",
+    "ClientboundStatusResponsePacketMixin",
+    "ServerStatusPingerResponseMixin",
+    "JoinMultiplayerScreenMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

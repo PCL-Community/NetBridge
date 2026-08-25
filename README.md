@@ -1,6 +1,6 @@
 <div align="center">
 
-# quic-mc
+# net-bridge
 
 <p align="center">
   <strong>A Minecraft mod that transports your game traffic over QUIC</strong>
@@ -33,7 +33,7 @@ Minecraft already has its own encrypted streams, and this mod just wants to take
 
 ## Configuration
 
-Add/Edit the file at `config/quic-mc/server.toml`. The file only has one config section:
+Add/Edit the file at `config/net-bridge/server.toml`. The file only has one config section:
 
 ```toml
 [quic]

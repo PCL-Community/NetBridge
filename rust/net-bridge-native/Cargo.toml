@@ -1,0 +1,31 @@
+[package]
+name = "net-bridge-native"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+name = "net_bridge_native"
+crate-type = ["cdylib", "lib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Runtime
+jni = "0.22"
+tokio = { version = "1", features = ["full"] }
+
+# Record
+dashmap = "6"
+
+# Connection
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn-proto = "0.11"
+quinn-plaintext = "0.3"
+bytes = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+# 剥离符号表（jar 体积）：2.9MB → ~2.0MB。不加 panic="abort"——
+# JNI 层 resolve_default 依赖 catch_unwind 把 panic 转为错误返回。
+strip = "symbols"

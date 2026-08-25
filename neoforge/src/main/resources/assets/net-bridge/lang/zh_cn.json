@@ -1,0 +1,7 @@
+{
+  "netbridge.transport.mode": "传输模式",
+  "netbridge.transport.tcp": "传输: TCP",
+  "netbridge.transport.quic": "传输: QUIC",
+  "netbridge.transport.quic_fallback": "传输: QUIC+回退",
+  "netbridge.status.quic_tag": " [QUIC]"
+}

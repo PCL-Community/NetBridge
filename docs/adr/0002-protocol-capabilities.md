@@ -23,7 +23,7 @@
       "quic": {
         "features": ["quic-raw"],
         "port": 25565,
-        "protocol": "quic-mc/1"
+        "protocol": "net-bridge/1"
       }
     }
   }
@@ -42,7 +42,7 @@
 
 - Ping 无 `networks` 或 `features` 不含 `quic-raw` → 视作不支持 QUIC，走 TCP。
 - QUIC 握手失败/超时（如 5s）→ QUIC-with-fallback 回退 TCP；QUIC-only 显示错误。
-- 协议版本不匹配（`protocol != "quic-mc/1"`）→ 降级 TCP。
+- 协议版本不匹配（`protocol != "net-bridge/1"`）→ 降级 TCP。
 
 ## 后果
 

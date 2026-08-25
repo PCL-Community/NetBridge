@@ -21,7 +21,7 @@
 
 ### 2. 对“同样接管传输层”的 mod：不承诺无条件共存
 
-- ViaVersion、DirectConnection、反欺诈代理等同样替换/包装 `Connection` 工厂与管道的 mod，与 quic-mc **共享同一接管点**，mixin 顺序/契约可能冲突（与“同一文件两个 patch 不能同时应用”同类）。
+- ViaVersion、DirectConnection、反欺诈代理等同样替换/包装 `Connection` 工厂与管道的 mod，与 net-bridge **共享同一接管点**，mixin 顺序/契约可能冲突（与“同一文件两个 patch 不能同时应用”同类）。
 - 缓解：
   - 明确“QUIC 接管可全局开关”（仅 TCP 行为）便于排查；
   - 文档化已知冲突清单；

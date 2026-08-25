@@ -1,0 +1,7 @@
+{
+  "netbridge.transport.mode": "Transport",
+  "netbridge.transport.tcp": "Transport: TCP",
+  "netbridge.transport.quic": "Transport: QUIC",
+  "netbridge.transport.quic_fallback": "Transport: QUIC+Fallback",
+  "netbridge.status.quic_tag": " [QUIC]"
+}

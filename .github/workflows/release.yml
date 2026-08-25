@@ -25,16 +25,16 @@ jobs:
         include:
           - os: ubuntu-latest
             dir: linux-x86_64
-            lib: libqmc_native.so
+            lib: libnet_bridge_native.so
           - os: ubuntu-24.04-arm
             dir: linux-aarch64
-            lib: libqmc_native.so
+            lib: libnet_bridge_native.so
           - os: macos-latest
             dir: macos-aarch64
-            lib: libqmc_native.dylib
+            lib: libnet_bridge_native.dylib
           - os: windows-latest
             dir: windows-x86_64
-            lib: qmc_native.dll
+            lib: net_bridge_native.dll
     steps:
       - uses: actions/checkout@v4
 
@@ -42,17 +42,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust/qmc-native
+          workspaces: rust/net-bridge-native
 
       - name: Build Rust cdylib
-        working-directory: rust/qmc-native
+        working-directory: rust/net-bridge-native
         run: cargo build --release
 
       # artifact 内保持 <dir>/<lib> 结构；package job merge-multiple 后
       # 恰好还原为 build/native/<dir>/<lib>，Gradle 原样打入 jar。
       - name: Stage native library
         shell: bash
-        run: mkdir -p stage/${{ matrix.dir }} && cp rust/qmc-native/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
+        run: mkdir -p stage/${{ matrix.dir }} && cp rust/net-bridge-native/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
 
       - name: Upload native library
         uses: actions/upload-artifact@v4
