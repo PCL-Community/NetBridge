@@ -19,6 +19,7 @@ class ServerConfigTest {
         assertTrue(config.quic().enable());
         assertEquals(-1, config.quic().port());
         assertNull(config.quic().bind());
+        assertFalse(config.kcp().enable(), "kcp 默认关闭");
         assertEquals(-1, config.kcp().port(), "kcp 默认 -1（解析为 MC 端口+1）");
     }
 
@@ -71,7 +72,7 @@ class ServerConfigTest {
         ServerConfig config = ServerConfig.load();
         assertTrue(config.quic().enable(), "缺 enable 默认 true");
         assertNull(config.quic().maxConnection(), "未配置字段保留 null，由 acceptor 解析默认值");
-        assertTrue(config.kcp().enable());
+        assertFalse(config.kcp().enable(), "kcp 缺 enable 默认 false（与模板一致，缺段不意外开启监听）");
         assertEquals("balance", config.kcp().profile(), "段缺 profile 时由模板默认补齐 balance");
     }
 

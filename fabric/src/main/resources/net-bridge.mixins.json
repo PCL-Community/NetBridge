@@ -11,6 +11,10 @@
     "ServerStatusPingerResponseMixin",
     "JoinMultiplayerScreenMixin"
   ],
+  "client": [
+    "ConnectScreenMixin",
+    "DebugScreenOverlayMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

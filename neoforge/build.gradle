@@ -35,6 +35,15 @@ dependencies {
 
 def libBundleTrees = files(configurations.libBundle.files.collect { zipTree(it) })
 
+// mods.toml 的 version 占位由构建注入，与根项目 modVersion 保持一致
+// （fabric.mod.json 走同一机制），避免发版时手工改两处。
+processResources {
+    inputs.property 'version', modVersion
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand 'version': modVersion
+    }
+}
+
 neoForge {
     version = neoForgeVersion
     validateAccessTransformers = true

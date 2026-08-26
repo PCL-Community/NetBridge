@@ -72,8 +72,9 @@ public final class ServerConfig {
             try (CommentedFileConfig config = CommentedFileConfig.builder(file).build()) {
                 config.load();
                 return new ServerConfig(
-                        readSection(config, "quic", null),
-                        readSection(config, "kcp", SectionDefaults.KCP.profile()));
+                        readSection(config, "quic", SectionDefaults.QUIC.enable(), null),
+                        readSection(config, "kcp",
+                                SectionDefaults.KCP.enable(), SectionDefaults.KCP.profile()));
             }
         } catch (Exception e) {
             NetBridge.LOGGER.warn("Failed to load server config {}: {}", file, e.toString());
@@ -102,8 +103,15 @@ public final class ServerConfig {
         }
     }
 
-    /** 读取单个传输段；段整体缺失时以默认值构造。 */
-    private static Section readSection(CommentedFileConfig config, String name, String defaultProfile) {
+    /**
+     * 读取单个传输段；段整体缺失时以默认值构造。
+     *
+     * @param defaultEnable 段缺 {@code enable} 字段时的默认值
+     *                      （quic=true，kcp=false——与模板文档一致，
+     *                      缺整段不等于意外开启监听）
+     */
+    private static Section readSection(
+            CommentedFileConfig config, String name, boolean defaultEnable, String defaultProfile) {
         Boolean enable = config.get(name + ".enable");
         String bind = config.get(name + ".bind");
         String host = config.get(name + ".host");
@@ -111,7 +119,7 @@ public final class ServerConfig {
         Integer maxConnection = config.get(name + ".max_connection");
         String profile = config.<String>get(name + ".profile");
         return new Section(
-                enable == null || enable,
+                enable == null ? defaultEnable : enable,
                 bind,
                 host != null && !host.isBlank() ? host : null,
                 port,

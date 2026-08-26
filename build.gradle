@@ -74,7 +74,6 @@ def syncedCopies = [
     ['mixin/ConnectScreenMixin.java', 'mixin/ConnectScreenMixin.java'],
     ['mixin/DebugScreenOverlayMixin.java', 'mixin/DebugScreenOverlayMixin.java'],
     ['mixin/JoinMultiplayerScreenMixin.java', 'mixin/JoinMultiplayerScreenMixin.java'],
-    ['mixin/MinecraftServerLifecycleMixin.java', 'mixin/MinecraftServerLifecycleMixin.java'],
     ['mixin/ServerStatusPingerResponseMixin.java', 'mixin/ServerStatusPingerResponseMixin.java'],
     ['mixin/StatusResponseWriteMixin.java', 'mixin/StatusResponseWriteMixin.java'],
 ]

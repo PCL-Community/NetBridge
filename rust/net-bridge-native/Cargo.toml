@@ -2,7 +2,7 @@
 name = "net-bridge-native"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0"
 
 [lib]
 name = "net_bridge_native"

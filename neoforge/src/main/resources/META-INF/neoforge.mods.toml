@@ -1,10 +1,10 @@
 modLoader="javafml"
 loaderVersion="[1,)"
-license="MIT"
+license="AGPL-3.0"
 
 [[mods]]
 modId="net_bridge"
-version="0.1.0"
+version="${version}"
 displayName="net-bridge (NeoForge)"
 description="QUIC transport capability for Minecraft (quinn-plaintext, transparent byte stream replacement)."
 

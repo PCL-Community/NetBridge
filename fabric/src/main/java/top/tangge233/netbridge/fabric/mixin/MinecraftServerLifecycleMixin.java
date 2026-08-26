@@ -21,6 +21,11 @@ public class MinecraftServerLifecycleMixin {
     @Inject(method = "runServer", at = @At("HEAD"))
     private void netbridge$startAcceptors(CallbackInfo ci) {
         MinecraftServer self = (MinecraftServer) (Object) this;
+        // 仅专用服务器启动 acceptor：集成端（单人/LAN）的 getPort() 为 -1，
+        // QUIC 会绑定失败刷错误日志；KCP 随机端口会在玩家本机开 UDP 监听。
+        if (!self.isDedicatedServer()) {
+            return;
+        }
         NativeAcceptor.setConnectionHandler(connId -> NativeServerTransport.adopt(self, connId));
         NativeAcceptor.start(self.getPort(), self.getLocalIp());
     }
