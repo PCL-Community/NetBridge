@@ -1,0 +1,10 @@
+{
+  "netbridge.transport.mode": "传输模式",
+  "netbridge.transport.tcp": "传输: TCP",
+  "netbridge.transport.quic": "传输: QUIC",
+  "netbridge.transport.kcp": "传输: KCP",
+  "netbridge.transport.tooltip": "QUIC/KCP 连接握手失败两次后自动回退 TCP；5 分钟内重连同一服务器将直接使用 TCP。",
+  "netbridge.status.accelerated_tag": " [QUIC/KCP]",
+  "netbridge.connect.connecting": "正在建立 %s 连接…",
+  "netbridge.connect.falling_back": "正在回退 TCP 连接…"
+}

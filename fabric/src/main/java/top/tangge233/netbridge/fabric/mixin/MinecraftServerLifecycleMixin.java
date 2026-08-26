@@ -6,20 +6,23 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import top.tangge233.netbridge.fabric.mc.QuicServerTransport;
-import top.tangge233.netbridge.server.QuicServer;
+import top.tangge233.netbridge.fabric.mc.NativeServerTransport;
+import top.tangge233.netbridge.server.NativeAcceptor;
 
 /**
- * 服务端生命周期：runServer 开始时启动 QUIC acceptor，close 时停止。
+ * 服务端生命周期：runServer 开始时启动 QUIC/KCP acceptor，close 时停止。
  * （不依赖 fabric-api，纯 mixin 实现。）
+ *
+ * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
+ * 修改时必须同步两处。
  */
 @Mixin(MinecraftServer.class)
 public class MinecraftServerLifecycleMixin {
     @Inject(method = "runServer", at = @At("HEAD"))
-    private void netbridge$startAcceptor(CallbackInfo ci) {
+    private void netbridge$startAcceptors(CallbackInfo ci) {
         MinecraftServer self = (MinecraftServer) (Object) this;
-        QuicServer.setConnectionHandler(connId -> QuicServerTransport.adopt(self, connId));
-        QuicServer.start(self.getPort(), self.getLocalIp());
+        NativeAcceptor.setConnectionHandler(connId -> NativeServerTransport.adopt(self, connId));
+        NativeAcceptor.start(self.getPort(), self.getLocalIp());
     }
 
     /**
@@ -27,8 +30,8 @@ public class MinecraftServerLifecycleMixin {
      * 关闭注解处理器的重映射检查（remap = false）。
      */
     @Inject(method = "close()V", remap = false, at = @At("HEAD"))
-    private void netbridge$stopAcceptor(CallbackInfo ci) {
-        QuicServer.setConnectionHandler(null);
-        QuicServer.stop();
+    private void netbridge$stopAcceptors(CallbackInfo ci) {
+        NativeAcceptor.setConnectionHandler(null);
+        NativeAcceptor.stop();
     }
 }

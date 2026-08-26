@@ -2,7 +2,7 @@ plugins {
     id 'java-library'
 }
 
-// 纯 Java + Netty + gson，零 Minecraft 依赖（ADR-0006）。
+// 纯 Java + Netty + gson，零 Minecraft 依赖。
 repositories {
     maven { url = 'https://maven.aliyun.com/repository/public' }
     mavenCentral()

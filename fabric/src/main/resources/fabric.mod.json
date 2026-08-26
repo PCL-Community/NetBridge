@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "net-bridge",
+  "id": "net_bridge",
   "version": "${version}",
   "name": "net-bridge (Fabric)",
   "description": "QUIC transport capability for Minecraft (quinn-plaintext, transparent byte stream replacement).",

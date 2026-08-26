@@ -10,7 +10,9 @@
     "ConnectionMixin",
     "ClientboundStatusResponsePacketMixin",
     "ServerStatusPingerResponseMixin",
-    "JoinMultiplayerScreenMixin"
+    "JoinMultiplayerScreenMixin",
+    "ConnectScreenMixin",
+    "DebugScreenOverlayMixin"
   ],
   "injectors": {
     "defaultRequire": 1

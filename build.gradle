@@ -12,7 +12,7 @@ allprojects {
     version = modVersion
 }
 
-// --- Rust cdylib 集成（根项目统一构建，ADR-0006 决策 4） ---
+// --- Rust cdylib 集成（根项目统一构建） ---
 // -PnativeProfile=debug|release 选择 cargo profile（默认 debug）。
 def nativeProfile = (findProperty('nativeProfile') ?: 'debug').toString()
 if (!(nativeProfile in ['debug', 'release'])) {
@@ -64,21 +64,24 @@ tasks.register('buildCdylib') {
     }
 }
 
-// --- 双平台源码副本同步校验（ADR-0006：共享 MC 逻辑按平台复制源码） ---
+// --- 双平台源码副本同步校验（共享 MC 逻辑按平台复制源码） ---
 // 副本仅允许 package/import 差异（平台包名不同），其余必须逐字一致。
 def syncedCopies = [
-    ['mc/QuicClientTransport.java', 'mc/QuicClientTransport.java'],
-    ['mc/QuicServerTransport.java', 'mc/QuicServerTransport.java'],
+    ['mc/NativeClientTransport.java', 'mc/NativeClientTransport.java'],
+    ['mc/NativeServerTransport.java', 'mc/NativeServerTransport.java'],
     ['mixin/ClientboundStatusResponsePacketMixin.java', 'mixin/ClientboundStatusResponsePacketMixin.java'],
     ['mixin/ConnectionMixin.java', 'mixin/ConnectionMixin.java'],
+    ['mixin/ConnectScreenMixin.java', 'mixin/ConnectScreenMixin.java'],
+    ['mixin/DebugScreenOverlayMixin.java', 'mixin/DebugScreenOverlayMixin.java'],
     ['mixin/JoinMultiplayerScreenMixin.java', 'mixin/JoinMultiplayerScreenMixin.java'],
+    ['mixin/MinecraftServerLifecycleMixin.java', 'mixin/MinecraftServerLifecycleMixin.java'],
     ['mixin/ServerStatusPingerResponseMixin.java', 'mixin/ServerStatusPingerResponseMixin.java'],
     ['mixin/StatusResponseWriteMixin.java', 'mixin/StatusResponseWriteMixin.java'],
 ]
 
 tasks.register('checkSyncedCopies') {
     group = 'verification'
-    description = 'Verifies fabric/neoforge source copies stay in sync (ADR-0006).'
+    description = 'Verifies fabric/neoforge source copies stay in sync.'
     doLast {
         def base = [
             fabric  : file('fabric/src/main/java/top/tangge233/netbridge/fabric'),
@@ -100,13 +103,13 @@ tasks.register('checkSyncedCopies') {
         }
         if (failed) {
             throw new GradleException(
-                'Synced source copies out of sync (ADR-0006):\n  ' + failed.join('\n  '))
+                'Synced source copies out of sync:\n  ' + failed.join('\n  '))
         }
         println "synced copies OK (${syncedCopies.size()} pairs)"
     }
 }
 
-// --- 产物聚合（ADR-0006 决策 5）：双平台 jar 收集到根 build/libs/ ---
+// --- 产物聚合：双平台 jar 收集到根 build/libs/ ---
 def rootLibs = layout.buildDirectory.dir('libs')
 
 tasks.register('assembleAll') {

@@ -3,7 +3,7 @@ loaderVersion="[1,)"
 license="MIT"
 
 [[mods]]
-modId="net-bridge"
+modId="net_bridge"
 version="0.1.0"
 displayName="net-bridge (NeoForge)"
 description="QUIC transport capability for Minecraft (quinn-plaintext, transparent byte stream replacement)."

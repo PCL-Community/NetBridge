@@ -1,64 +1,66 @@
-# net-bridge 术语表（Glossary）
+# net-bridge 术语表
 
-本术语表服务于 net-bridge 的 ADR 与实现，随文档持续更新。
-（当前方向：无 TLS、无 zstd、无指纹，仅传输能力识别 + QUIC 管道替换。）
+随 grilling 进展更新。标 ⏳ 的条目仍在拷问中，定稿后移除标记。
+ADR 序列自重构起重新编号（docs/adr/0001 起）；旧代码注释中 ADR-0001~0007 引用已弃用，重构时随手清理。
 
-## 通用
+## 架构总览
 
-- **TCP（原版连接）**：Minecraft 默认的字节流传输。net-bridge 保留其作为兼容与回退路径。
-- **QUIC（连接）**：基于 UDP 的 IETF 传输协议（由 Rust `quinn-proto`/`quinn-plaintext` 实现），提供多路复用、低延迟、抗队头阻塞、连接迁移；本项目以**明文管道**形式使用（无加密层）。
-- **QUIC-with-TCP-fallback（智能回退）**：客户端模式之一：优先 QUIC，在握手失败/UDP 被 NAT 阻断/能力不匹配时自动回退 TCP。
-- **quic-raw**：net-bridge 对 QUIC 连接的特性标记，出现于 Ping 响应 `networks` 字段中，表示该服务端可提供 raw（明文）QUIC 传输。
-- **管道路径 / 字节流语义**：MC 应用层（`Connection`/Netty）所见的帧流。net-bridge 保持与 TCP 完全一致的字节流语义（帧长度、顺序、压缩、加密状态均不变），以达成对其它 mod 透明。
-- **明文 QUIC（Plaintext QUIC）**：使用 `quinn-plaintext`（无 TLS/无证书）的 QUIC 管道。**不提供**机密性、完整性、认证；仅限可信/隔离网络或底层已有加密（如 WireGuard）场景。0.2.0+ 自带 checksum（仅防随机损坏，非认证 MAC）。
-- **JNI 桥（JNI Bridge）**：Java ⇄ Rust 的同步批量字节队列接口，Java 通过 `writeChunk/readChunk` 与 Rust QUIC 传输交换数据，避免逐包跨 JNI。读侧另有零分配变体 `readChunkInto`：native 直写调用方提供的池化直接缓冲区（`QuicChannel` 读路径默认走此通道），稳态无每读堆分配。
-- **Channel 适配器（QUIC Channel Adapter）**：Java 侧包装 QUIC 流的 Netty `Channel`，使原版 `Connection` 以一致接口读写，原版握手/登录/游玩逻辑不变。
-- **传输能力识别（Transport Capability Advertise）**：服务端在 Ping 响应 `networks` 字段声明 QUIC 能力（`quic-raw`、端口、`protocol: "net-bridge/1"`）；客户端据此选择 TCP/QUIC/fallback。**不做登录期能力协商**（无 `encryption_skip`/`zstd_stream` 等 flag）。
+- **net-bridge**：Minecraft mod 总体。`common`（平台无关逻辑）+ `fabric` / `neoforge`（loader 适配层）。
+- **net-bridge-native**：Rust crate，经 JNI 向 Java 暴露传输原语。持有 tokio runtime 与 endpoint。
+- **JNI 桥**：Java `top.tangge233.netbridge.jni.NativeBridge`（原 `QuicNative`，ADR-0007 去协议化改名）
+  ↔ Rust 导出函数。句柄式注册表（传输无关 `long` id）。ABI `0.2.0`，不匹配即拒绝加载。
+- **Transport trait**（Rust，ADR-0007）：connect/accept/state/read/write/close 统一抽象；
+  quic 与 kcp 各自实现，JNI 层经 `dyn Transport` 分派。
+- **双 loader 源码副本**：mixin 与 transport 类在 fabric/neoforge 各一份源码副本；mixin 仅挂载点，
+  逻辑下沉 common。
 
-## Minecraft 相关
+## 传输协议
 
-- **Mojang 映射（Mojang Mappings）**：Minecraft 官方反混淆映射，net-bridge 核心使用它，以避免 Fabric 中间层/NeoForge 特有命名差异。
-- **NeoForge**：Minecraft 1.21.1 的 modding 平台之一（基于 Forge 的后续分支），提供事件总线与 payload 注册。
-- **Fabric**：另一 modding 平台，提供 `ServerLoginNetworking`/`ClientLoginNetworking` 登录期查询 API。
-- **原版密钥交换 / 认证仪式**：登录时客户端生成随机会话密钥、以服务器公钥加密后发送，并由服务器派生 `serverId`、调用 `hasJoinedServer` 完成在线模式认证的流程。**本项目不修改它**（ADR-0003 已否决跳过）。
-- **AES/CFB8（会话流加密）**：原版登录后安装的无认证流式加密（CFB8）。**在本项目中原版行为不变**（QUIC 流之上照常运行）。
-- **`setEncryption`**：原版连接认证后安装 AES cipher 的环节。**本项目不跳过、不修改**。
-- **`hasJoinedServer`**：Mojang 会话服务接口，服务器调用它以验证玩家是否已通过认证（在线模式）。**本项目不触碰**。
-- **`RegisterPayloadHandlersEvent`**：NeoForge 注册自定义 payload 的入口（本项目仅用于 play/configuration 阶段，不扩展 login 阶段）。
-- **`ServerLoginNetworking` / `ClientLoginNetworking`**：Fabric 登录期查询 API。**本项目不依赖它**（无登录期协商）。
-- **Ping（服务器列表）**：客户端通过 TCP 向服务器（status 协议）发送的服务器信息查询，响应 JSON 含版本、玩家、描述、favicon；net-bridge 扩展 `networks` 字段做传输能力识别。
-- **`networks` 字段**：Ping 响应 JSON 中 net-bridge 新增的顶层字段，声明 `quic` 能力、端口、协议版本（`protocol: "net-bridge/1"`）与特性列表（`["quic-raw"]`）。
-- **原版 zlib 压缩（`SetCompression`）**：Minecraft 原版的包压缩。**本项目不修改、不叠加 zstd**（ADR-0004 已否决）。
+- **QUIC 明文（quic-plaintext）**：QUIC 传输但关闭 TLS 加密；安全性由 Minecraft 自带加密流保证。动机：省一次加密握手开销。
+- **KCP 栈**（自外向内）：**FEC(RS) → KCP → ExtendedCmd**。
+  - **FEC / RS 码**：Reed-Solomon 前向纠错，最外层 UDP 包保护。实现在 `bridge/kcp/fec_stream.rs`。
+  - **KCP**：可靠低延迟 ARQ，stream 模式（字节流管道），tokio_kcp 实现。
+  - **ExtendedCmd**：KCP 缺失关闭语义的补丁层，即 `bridge/kcp/frame.rs` 应用帧：`[type:1][len:u16 BE][payload]`，type=0 数据帧、type=1 控制帧(close)。帧边界即 flush，不满 FEC 尾块零填充立即发出。
+- **KCP profile**：预设参数档，仅二档不支持自定义。配置串规范 `balance` / `aggressive`
+  （Rust 解析兼容别名 `balanced`）：
+  - **balance**：nodelay=0/interval=40/resend=0/nc=0，mtu=1300，wnd=(256,256)，stream=true。
+  - **aggressive**：nodelay=1/interval=10/resend=2/nc=1，其余同上。
 
-## 构建与工具
+## 能力发现
 
-- **Gradle 多模块构建**：单 Gradle 构建内 include `:common` / `:neoforge` / `:fabric` 三个子项目（ADR-0006）。根项目负责 Rust cdylib 与产物聚合。
-- **ModDevGradle**：NeoForge 官方 Gradle 插件，仅应用于 `:neoforge`，提供 mojmap 命名的 Minecraft 依赖。
-- **Fabric Loom**：Fabric 官方 Gradle 插件，仅应用于 `:fabric`，提供 minecraft 依赖、`remapJar`（mojmap→intermediary）与 `runClient` 开发环境。
-- **Intermediary 映射**：Fabric 运行时的中性类命名（如 `net.minecraft.class_2535`）。Fabric mod 必须在打包时由 Loom 从 Mojang 映射重映射到 intermediary，否则无法加载。
-- **remapJar**：Loom 的重映射打包任务，产出可在 Fabric Loader 加载的 jar。
-- **mise**：工具链版本管理器，管理 JDK 21、Gradle 等版本。
-- **cdylib（.so）**：Rust 编译产出的共享库，通过 JNI 被 Java 加载。
-- **rules_rust**：Bazel 官方 Rust 规则集，用于 `rust_shared_library` 构建 cdylib。
-- **quinn-plaintext**：基于 quinn-proto 的明文化传输插件（无 TLS），用于本项目的 QUIC 管道。
-- **quinn-proto**：QUIC 传输协议实现（状态机、拥塞控制等），quinn-plaintext 以其为基础。
+- **networks 能力**：服务端在列表 ping 响应 JSON 注入的顶层 `networks` 对象，每传输一个条目
+  `{enable, host, port, protocol}`（ADR-0001）。`enable` 缺失 = false；`host` 缺失/null = 跟随服务器地址；`features` 字段已废除。
+- **protocol 版本串**：`net-bri-quic/1`、`net-bri-kcp/1`。客户端精确比对自身支持集，
+  不支持的协议 → 该传输本地禁用（ADR-0001）。版本演进只看 protocol 串。
 
-## 架构层（按数据流）
+## 客户端行为
 
-1. **Java / MC 协议层**：原版 `Connection` + 网络事件，生成/消费 MC 协议帧。
-2. **QUIC Channel 适配器**：把 QUIC 流暴露为 Netty `Channel`，接入原版连接管道。
-3. **JNI 桥**：批量字节队列，Java ⇄ Rust 数据交换。
-4. **Rust QUIC 传输层**：quinn-plaintext endpoint、QUIC 流、UDP socket、tokio runtime（**无 TLS/无压缩**）。
+- **TransportMode**：三档 `tcp` / `quic` / `kcp`（ADR-0002）。quic/kcp 内置 TCP 降级，tcp 无降级概念。
+- **fallback（降级）**：单次连接流程内目标传输至多尝试 2 次（第 1 次超时 10 s、第 2 次 20 s，
+  native FAILED 立即计败），两败后本次连接改走 TCP（ADR-0002）。
+  所选传输未宣告/协议不支持 → 直接走 TCP，不尝试其他加速传输（ADR-0002 补充）。
+- **降级记忆**：按服务器地址记忆 fallback 结果，TTL 5 分钟；**命中即直接走 TCP、跳过全部
+  加速尝试**，过期后重新执行完整尝试序列（ADR-0002）。
+- **握手存活判定**：Java `HandshakeWatchdog` 竞速 connect promise（10s/20s）——quinn 黑洞下永不
+  自行失败、KCP 无握手概念，watchdog 为唯一可行方案（ADR-0008）。QUIC 的 CONNECTED = 明文握手
+  完成；**KCP 的 CONNECTED = 首个入站字节到达**（重定义，防黑洞误判保住降级窗口）。
+- **连接提示**：ConnectScreen 另起一行显示实际状态机文案——"正在建立 QUIC/KCP/TCP 连接"、
+  降级时"正在回退 TCP 连接"（ADR-0005）。服务器列表 tooltip 说明降级策略。
+- **F3 协议行**：单行 `[net-bridge] <QUIC|KCP|TCP> <addr>`，显示实际生效协议与连接地址（ADR-0005）。
 
-## 版本锁定约定
+## 配置
 
-- **Minecraft 1.21.1 双平台锁定**：`:neoforge`（NeoForge 21.1.183）与 `:fabric`（`minecraft_version=1.21.1`）必须锁定同一 MC 版本；升级时同步修改 `gradle.properties` 并双平台回归（ADR-0006）。
+- **nightconfig**：MC 生态 TOML 配置库。服务端 `config/net-bridge/server.toml`；客户端同目录 `config/net-bridge/client.toml`。
+- **游戏内切换按钮**：保留（多人游戏屏幕底部），与配置文件双向同步（读文件初始值、切换即写回）。
+- **服务端 `[quic]`/`[kcp]` 段**（字段一致）：`enable`（**quic 默认 true，kcp 默认 false**）/ `bind`（默认 0.0.0.0）/ `host`（null=跟随服务器地址）/ `port`（-1 跟随 MC 端口，**kcp 为 MC 端口+1**；0 随机；越界或 bind 失败→日志报错并禁用该传输）/ `max_connection`（默认 256，达限静默丢弃新客户端——防 UDP 反射，quic/kcp 独立计数）（ADR-0003）。ping 条目恒下发**解析后的具体端口**，-1/0 不上 wire（ADR-0001）。
+- **客户端 `mode`**：tcp（默认）/ quic / kcp；`[kcp] profile` = balance（默认）/ aggressive。系统属性 `netbridge.transport` 同名覆盖配置文件；旧取值（`quic-fallback` 等）废弃。无迁移（Alpha 硬切）。
 
-## 决策记录索引
+## JNI 数据面
 
-- ADR-0001：传输架构（TCP 保留 + QUIC 可选，quinn-plaintext 管道，无 TLS/无 zstd/无指纹）
-- ADR-0002：传输能力识别（`networks` 字段 + 模式选择，无登录期协商）
-- ADR-0003：认证与加密（**已否决**——无认证解耦/无指纹，原版认证与加密不变）
-- ADR-0004：zstd 流压缩（**已否决**——不引入压缩层）
-- ADR-0005：对其它模组的透明性边界（普通 mod 透明；传输层独占 mod 不承诺共存）
-- ADR-0006：多模块构建架构（common/neoforge/fabric 三子项目；共享 MC 逻辑按平台复制源码；Fabric 走 Loom remapJar）
+- **批量桥接口**：同步 `writeChunk(byte[], length)` / `readChunk(maxBytes)` / `readChunkInto(direct ByteBuffer)`
+  / `connectionState(conn)`；句柄式注册表。
+- **边界策略**（ADR-0004）：零拷贝仅限各语言内部（Rust 用 `Bytes`）；JNI 边界显式允许拷贝换内存安全。
+  `readChunkInto` 为唯一豁免的直接内存路径（SAFETY 论证完备，保留）；不新增其他直接内存变体。
+- **线程模型**（ADR-0006）：Netty EventLoop 自适应轮询——连接期固定 5ms；活跃期 5ms，
+  连续空转步进退避至 40ms 上限；拒绝回调/wakeup fd/每连接阻塞线程三方案。
+- 返回约定：入队字节数（0=队列满须重试）、读取数（0=暂无）、-1/null=非法或连接失效。

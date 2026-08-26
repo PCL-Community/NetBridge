@@ -3,7 +3,7 @@
 # net-bridge
 
 <p align="center">
-  <strong>A Minecraft mod that transports your game traffic over QUIC</strong>
+  <strong>A Minecraft mod that transports your game traffic over QUIC/KCP</strong>
 </p>
 
 [![License](https://img.shields.io/badge/license-AGPL--v3-blue.svg)](LICENSE)
@@ -21,11 +21,18 @@ But this doesn't work for everyone. Your firewall or ISP may block or slow down 
 
 ## How it works?
 
-The mod took over Minecraft's server connection stream and used QUIC-Plaintext to transport data streams. The mod uses JNI to call the connection streaming and management component written by Rust.
+The mod took over Minecraft's server connection stream and used QUIC-Plaintext (or KCP with FEC) to transport data streams. The mod uses JNI to call the connection streaming and management component written by Rust.
 
-The server will send the network ability during the ping. If server supports quic connection, you will see `[QUIC]` at the end of server description.
+The server announces its accelerated transports in the ping response under a top-level `networks` object, one entry per transport:
 
-The project is planning to give you more protocol options in the future (e.g. kcp).
+```json
+"networks": {
+  "quic": {"enable": true, "port": 25565, "protocol": "net-bri-quic/1"},
+  "kcp":  {"enable": true, "port": 25566, "protocol": "net-bri-kcp/1"}
+}
+```
+
+If a server supports accelerated connections, you will see `[QUIC/KCP]` at the end of its description. The client picks QUIC or KCP from the transport button in the multiplayer screen; if two handshake attempts fail (e.g. UDP blocked), it falls back to TCP automatically for that connection and remembers it for 5 minutes.
 
 ### Why disable QUIC's default encryption?
 
@@ -33,12 +40,33 @@ Minecraft already has its own encrypted streams, and this mod just wants to take
 
 ## Configuration
 
-Add/Edit the file at `config/net-bridge/server.toml`. The file only has one config section:
+Server: `config/net-bridge/server.toml`, one section per transport:
 
 ```toml
 [quic]
-port = 25566
+enable = true
+# -1 = follow the Minecraft TCP port; 0 = random; otherwise a fixed port
+port = -1
+bind = ""            # empty = follow server.properties server-ip
+host = ""            # advertised address; empty = follow the server address
+max_connection = 256 # excess connections are silently dropped
+
+[kcp]
+enable = true
+port = -1            # follows Minecraft TCP port + 1
+profile = "balance"  # or "aggressive"
 ```
+
+Client: `config/net-bridge/client.toml` (also switchable in game):
+
+```toml
+mode = "tcp"        # tcp / quic / kcp
+
+[kcp]
+profile = "balance" # balance / aggressive
+```
+
+System property `-Dnetbridge.transport=tcp|quic|kcp` overrides `mode`.
 
 ## Building
 

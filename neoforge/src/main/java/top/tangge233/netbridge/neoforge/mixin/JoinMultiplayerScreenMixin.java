@@ -9,17 +9,18 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import top.tangge233.netbridge.net.QuicClient;
-import top.tangge233.netbridge.net.TransportMode;
+import top.tangge233.netbridge.transport.ClientConfig;
+import top.tangge233.netbridge.transport.TransportMode;
 
 /**
- * 多人游戏屏幕底部加入「传输：TCP/QUIC」循环按钮（ADR-0002 模式选择），
- * 替代 JVM 参数配置。
+ * 多人游戏屏幕左上角「传输」循环按钮（TCP/QUIC/KCP 三档），切换即写回
+ * client.toml；tooltip 说明自动降级策略。
  *
- * mixin 继承目标类的父类 Screen，即可在注入方法内以 this 调用
+ * <p>mixin 继承目标类的父类 Screen，即可在注入方法内以 this 调用
  * protected 的 addRenderableWidget。
  *
- * 注意：本文件在 :neoforge 与 :fabric 各有一份源码副本（ADR-0006）。
+ * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
+ * 修改时必须同步两处。
  */
 @Mixin(JoinMultiplayerScreen.class)
 public abstract class JoinMultiplayerScreenMixin extends Screen {
@@ -30,22 +31,19 @@ public abstract class JoinMultiplayerScreenMixin extends Screen {
 
     @Inject(method = "init", at = @At("RETURN"))
     private void netbridge$addTransportButton(CallbackInfo ci) {
-        CycleButton<TransportMode> button = CycleButton.builder((TransportMode mode) -> switch (mode) {
-                    case TCP_ONLY -> Component.translatable("netbridge.transport.tcp");
-                    case QUIC_ONLY -> Component.translatable("netbridge.transport.quic")
-                            .withStyle(ChatFormatting.AQUA);
-                    case QUIC_WITH_TCP_FALLBACK ->
-                            Component.translatable("netbridge.transport.quic_fallback")
-                                    .withStyle(ChatFormatting.AQUA);
-                })
+        CycleButton<TransportMode> button = CycleButton.builder(
+                        (TransportMode mode) -> Component.translatable("netbridge.transport." + mode.configValue())
+                                .withStyle(mode == TransportMode.TCP ? ChatFormatting.WHITE : ChatFormatting.AQUA))
                 .withValues(TransportMode.values())
-                .withInitialValue(QuicClient.mode())
+                .withInitialValue(ClientConfig.mode())
                 .displayOnlyValue()
                 // 左上角：原版底部 64px 是两行居中按钮块（select/edit/refresh 等），
                 // 放底部会与其重叠；顶部左侧仅居中标题，无控件。
                 .create(5, 6, 110, 20,
                         Component.translatable("netbridge.transport.mode"),
-                        (btn, mode) -> QuicClient.setMode(mode));
+                        (btn, mode) -> ClientConfig.setMode(mode));
+        button.setTooltip(net.minecraft.client.gui.components.Tooltip.create(
+                Component.translatable("netbridge.transport.tooltip")));
         this.addRenderableWidget(button);
     }
 }

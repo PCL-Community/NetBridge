@@ -8,52 +8,50 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
-import top.tangge233.netbridge.neoforge.mc.QuicClientTransport;
-import top.tangge233.netbridge.net.NetworksAbility;
-import top.tangge233.netbridge.net.QuicClient;
-import top.tangge233.netbridge.net.QuicTarget;
+import top.tangge233.netbridge.NetBridge;
+import top.tangge233.netbridge.neoforge.mc.NativeClientTransport;
+import top.tangge233.netbridge.transport.ClientConfig;
+import top.tangge233.netbridge.transport.TransportMode;
+import top.tangge233.netbridge.transport.TransportSelector;
+import top.tangge233.netbridge.transport.TransportTarget;
 
 /**
- * 客户端出站连接拦截：目标地址宣告 QUIC 能力且模式开启时，改用 QUIC 通道；
- * QUIC 失败且允许 fallback 时自动回退原版 TCP（ADR-0002）。
+ * 客户端出站连接拦截：目标宣告了可用加速传输且模式开启时改用 native 通道；
+ * 握手两次失败自动回退原版 TCP。
  *
- * 注意：本文件在 :neoforge 与 :fabric 各有一份源码副本（ADR-0006）。
+ * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
+ * 修改时必须同步两处。
  */
 @Mixin(Connection.class)
 public abstract class ConnectionMixin {
-    /** fallback 递归防护：内部调用原版 connect 时不再触发本 mixin。 */
+    /** 回退递归防护：内部调用原版 connect 时不再触发本 mixin。 */
     @Unique
-    private static final ThreadLocal<Boolean> QUIC_IN_PROGRESS = ThreadLocal.withInitial(() -> Boolean.FALSE);
+    private static final ThreadLocal<Boolean> NETBRIDGE_IN_PROGRESS =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     @Inject(method = "connect", at = @At("HEAD"), cancellable = true)
-    private static void netbridge$tryQuic(
+    private static void netbridge$tryAccelerated(
             InetSocketAddress address,
             boolean useEpoll,
             Connection connection,
             CallbackInfoReturnable<ChannelFuture> cir) {
-        if (!QuicClient.quicEnabled() || Boolean.TRUE.equals(QUIC_IN_PROGRESS.get())) {
-            QuicClient.logTransportChoice(address, false,
-                    !QuicClient.quicEnabled() ? "mode=" + QuicClient.mode() : "fallback in progress");
+        if (Boolean.TRUE.equals(NETBRIDGE_IN_PROGRESS.get())) {
             return;
         }
-        QuicTarget target = QuicClient.quicTargetFor(address);
-        if (target == null) {
-            NetworksAbility networks = QuicClient.networksFor(address);
-            String reason = networks.supportsQuicRaw()
-                    ? "no quic port advertised"
-                    : (networks.quicInfo().isEmpty() ? "server did not advertise networks" : "quic-raw not supported");
-            if (QuicClient.quicEnabled()) {
-                QuicClient.logTransportChoice(address, false, reason);
-            }
+        TransportMode mode = ClientConfig.mode();
+        var targetOpt = TransportSelector.decide(address);
+        if (targetOpt.isEmpty()) {
+            NetBridge.LOGGER.info("Transport for {}: TCP (mode={})", address, mode);
             return;
         }
-        QuicClient.logTransportChoice(address, true,
-                "mode=" + QuicClient.mode() + ", quicPort=" + target.quicPort());
-        QUIC_IN_PROGRESS.set(Boolean.TRUE);
+        TransportTarget target = targetOpt.get();
+        NetBridge.LOGGER.info("Transport for {}: {} endpoint {}", address, target.mode(), target.endpoint());
+        NETBRIDGE_IN_PROGRESS.set(Boolean.TRUE);
         try {
-            cir.setReturnValue(QuicClientTransport.connectWithFallback(address, useEpoll, connection, target));
+            cir.setReturnValue(
+                    NativeClientTransport.connectWithFallback(address, useEpoll, connection, target));
         } finally {
-            QUIC_IN_PROGRESS.remove();
+            NETBRIDGE_IN_PROGRESS.remove();
         }
     }
 }

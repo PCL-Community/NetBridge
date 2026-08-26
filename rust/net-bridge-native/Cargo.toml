@@ -13,19 +13,23 @@ path = "src/lib.rs"
 # Runtime
 jni = "0.22"
 tokio = { version = "1", features = ["full"] }
+thiserror = "2"
 
 # Record
 dashmap = "6"
 
 # Connection
+socket2 = "0.6"
+
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 quinn-proto = "0.11"
 quinn-plaintext = "0.3"
 bytes = "1"
 
+tokio_kcp = "0.9.8"
+fec = "0.2.2"
+
 [profile.release]
 opt-level = 3
 lto = true
-# 剥离符号表（jar 体积）：2.9MB → ~2.0MB。不加 panic="abort"——
-# JNI 层 resolve_default 依赖 catch_unwind 把 panic 转为错误返回。
 strip = "symbols"

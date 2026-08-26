@@ -1,0 +1,10 @@
+{
+  "netbridge.transport.mode": "Transport",
+  "netbridge.transport.tcp": "Transport: TCP",
+  "netbridge.transport.quic": "Transport: QUIC",
+  "netbridge.transport.kcp": "Transport: KCP",
+  "netbridge.transport.tooltip": "Falls back to TCP after two failed handshakes; reconnects to the same server use TCP directly for 5 minutes.",
+  "netbridge.status.accelerated_tag": " [QUIC/KCP]",
+  "netbridge.connect.connecting": "Connecting via %s…",
+  "netbridge.connect.falling_back": "Falling back to TCP…"
+}

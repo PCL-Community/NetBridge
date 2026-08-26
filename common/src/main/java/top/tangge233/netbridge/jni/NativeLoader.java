@@ -81,12 +81,36 @@ public final class NativeLoader {
      * java.library.path（Gradle test 用 -Djava.library.path）。
      * 先加载 system 会优先命中库路径中被移植的同名文件（二进制种植面），
      * 内置版本不可被外部替换。
+     *
+     * <p>加载成功后校验 ABI 版本（{@link NativeBridge#EXPECTED_ABI_VERSION}）：
+     * 不匹配即抛出并给出明确日志——Java 与 native 的方法签名/语义可能已分叉，
+     * 带错运行会产生难以定位的崩溃。
      */
     public static synchronized void load() {
+        if (loaded) {
+            return;
+        }
         try {
             loadFromClasspath();
         } catch (RuntimeException | UnsatisfiedLinkError e) {
             loadSystem();
+        }
+        verifyAbi();
+    }
+
+    /** 校验 native ABI 版本；不匹配即抛出并记录双方版本号。 */
+    private static void verifyAbi() {
+        String actual;
+        try {
+            actual = NativeBridge.version();
+        } catch (Throwable t) {
+            throw new RuntimeException(
+                    "net-bridge native library loaded but version query failed: " + t, t);
+        }
+        if (!NativeBridge.EXPECTED_ABI_VERSION.equals(actual)) {
+            throw new IllegalStateException("net-bridge native ABI mismatch: expected "
+                    + NativeBridge.EXPECTED_ABI_VERSION + ", found " + actual
+                    + "; rebuild or update the net-bridge-native library");
         }
     }
 }

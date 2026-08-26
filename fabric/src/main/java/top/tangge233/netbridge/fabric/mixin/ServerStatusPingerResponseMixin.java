@@ -11,15 +11,15 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import top.tangge233.netbridge.net.NetworksAbility;
-import top.tangge233.netbridge.net.QuicClient;
-import top.tangge233.netbridge.net.StatusNetworksCapture;
+import top.tangge233.netbridge.ability.StatusNetworksCapture;
+import top.tangge233.netbridge.transport.TransportSelector;
 
 /**
- * Ping 响应到达时：记录 networks 能力到地址缓存；若服务端支持 quic-raw，
- * 在延迟栏文本下方追加「支持 QUIC 连接」标注。
+ * Ping 响应到达时：记录 networks 能力到地址缓存；若存在任一可用的加速传输，
+ * 在延迟栏文本下方追加「支持 QUIC/KCP 连接」标注。
  *
- * 注意：本文件在 :neoforge 与 :fabric 各有一份源码副本（ADR-0006）。
+ * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
+ * 修改时必须同步两处。
  */
 @Mixin(targets = "net.minecraft.client.multiplayer.ServerStatusPinger$1")
 public abstract class ServerStatusPingerResponseMixin {
@@ -31,13 +31,13 @@ public abstract class ServerStatusPingerResponseMixin {
 
     @Inject(method = "handleStatusResponse", at = @At("RETURN"))
     private void netbridge$recordNetworks(CallbackInfo ci) {
-        NetworksAbility networks = StatusNetworksCapture.take();
+        var networks = StatusNetworksCapture.take();
         SocketAddress remote = this.val$connection.getRemoteAddress();
         if (remote instanceof InetSocketAddress inetSocketAddress) {
-            QuicClient.record(inetSocketAddress, networks);
+            TransportSelector.record(inetSocketAddress, networks);
         }
-        if (networks.supportsQuicRaw() && this.val$data != null) {
-            Component tag = Component.translatable("netbridge.status.quic_tag")
+        if (networks.hasUsableAccelerated() && this.val$data != null) {
+            Component tag = Component.translatable("netbridge.status.accelerated_tag")
                     .withStyle(ChatFormatting.AQUA);
             this.val$data.motd = this.val$data.motd == null
                     ? tag

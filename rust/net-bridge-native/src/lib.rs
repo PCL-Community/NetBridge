@@ -1,27 +1,29 @@
-//! net-bridge-native: QUIC（quinn-plaintext）传输的 JNI 桥。
+//! net-bridge-native：QUIC / KCP 传输的 JNI 桥。
 //!
-//! 架构（ADR-0001）：
-//! - `bridge` 模块持有真实 quinn-plaintext endpoint / 连接 / 批量字节队列，
-//!   提供同步的 server/client/state/read/write 原语；
-//! - JNI 导出把这些原语暴露给 Java（`top.tangge233.netbridge.jni.QuicNative`），
-//!   每条 QUIC 连接 = 一个双向流，承载整个 MC 会话字节流。
+//! 架构：
+//! - [`bridge`] 模块持有连接注册表与批量字节队列，按 [`transport::TransportKind`]
+//!   分派 QUIC（quinn-plaintext）与 KCP（tokio-kcp + FEC）实现；
+//! - JNI 导出把这些原语暴露给 Java（`top.tangge233.netbridge.jni.NativeBridge`），
+//!   每条连接 = 一个双向字节流，承载整个 MC 会话。
 //!
 //! JNI 层（jni 0.22）：导出函数收 FFI 安全的 [`EnvUnowned`]，需要访问 JNI
 //! 时经 `with_env` 升级为 `&mut Env`；闭包被 catch_unwind 包裹，panic 不会
 //! 穿越原生方法边界 abort 宿主进程。错误统一记 stderr 日志并返回默认值。
 
 pub mod bridge;
+pub mod transport;
 
 use jni::errors::Error;
 use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
 use jni::sys::{jboolean, jbyte, jbyteArray, jint, jlong, jlongArray, jstring};
 use jni::{EnvOutcome, EnvUnowned, Outcome};
 
-pub const NET_BRIDGE_ABI_VERSION: &str = "0.1.0";
-pub const NET_BRIDGE_RAW_FEATURE: &str = "quic-raw";
+use transport::TransportKind;
+
+pub const NET_BRIDGE_ABI_VERSION: &str = "0.2.0";
 
 /// 统一解析 `with_env` 结果：Err/panic 记日志并返回调用方指定的默认值
-/// （与旧版"错误返回 -1/null"语义一致，细节见 net-bridge-native 日志）。
+/// （错误返回 -1/null 的 ABI 契约，细节见 net-bridge-native 日志）。
 fn resolve_default<T>(
     outcome: EnvOutcome<'_, T, Error>,
     context: &str,
@@ -45,8 +47,60 @@ fn valid_port(port: jint) -> Option<u16> {
     u16::try_from(port).ok()
 }
 
+/// 解析传输类别标签；非法值上报并拒绝。
+fn resolve_kind(kind: jint, context: &str) -> Option<TransportKind> {
+    match TransportKind::from_jint(kind) {
+        Some(k) => Some(k),
+        None => {
+            bridge::report_error(format!("{context}: invalid transport kind {kind}"));
+            None
+        }
+    }
+}
+
+/// 解析 KCP profile 字符串：null/空 = 默认 balance；非法值告警后回退默认
+/// （配置错误不致命）。
+fn resolve_profile(profile: Option<String>) -> bridge::kcp::config::KcpProfile {
+    use bridge::kcp::config::KcpProfile;
+    let Some(value) = profile else {
+        return KcpProfile::default();
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return KcpProfile::default();
+    }
+    match KcpProfile::parse(trimmed) {
+        Some(p) => p,
+        None => {
+            bridge::report_error(format!(
+                "invalid kcp profile '{trimmed}', falling back to balance"
+            ));
+            KcpProfile::default()
+        }
+    }
+}
+
+/// 读取可选字符串参数（null → None）。
+fn optional_string(
+    env: &mut EnvUnowned,
+    value: &JString,
+    context: &str,
+) -> Option<String> {
+    resolve_default(
+        env.with_env(|env| {
+            if value.is_null() {
+                Ok::<_, Error>(None)
+            } else {
+                Ok(Some(value.try_to_string(env)?))
+            }
+        }),
+        context,
+        || None,
+    )
+}
+
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_version(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_version(
     mut env: EnvUnowned,
     _class: JClass,
 ) -> jstring {
@@ -58,25 +112,18 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_version(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_rawFeature(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_startServer(
     mut env: EnvUnowned,
     _class: JClass,
-) -> jstring {
-    resolve_default(
-        env.with_env(|env| Ok(env.new_string(NET_BRIDGE_RAW_FEATURE)?.into_raw())),
-        "rawFeature",
-        std::ptr::null_mut,
-    )
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_startServer(
-    mut env: EnvUnowned,
-    _class: JClass,
+    kind: jint,
     port: jint,
     max_connections: jint,
     host: JString,
+    profile: JString,
 ) -> jlong {
+    let Some(kind) = resolve_kind(kind, "startServer") else {
+        return -1;
+    };
     let Some(port) = valid_port(port) else {
         bridge::report_error(format!("invalid listen port {port}"));
         return -1;
@@ -86,17 +133,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_startServer(
         return -1;
     }
     // bind 为空/null 时用默认地址族（[::] 双栈 → 0.0.0.0），否则仅绑定指定 IP。
-    let host = resolve_default(
-        env.with_env(|env| {
-            if host.is_null() {
-                Ok::<_, Error>(String::new())
-            } else {
-                host.try_to_string(env)
-            }
-        }),
-        "startServer",
-        || String::new(),
-    );
+    let host = optional_string(&mut env, &host, "startServer").unwrap_or_default();
     let bind = match host.trim() {
         "" => None,
         s => match s.parse::<std::net::IpAddr>() {
@@ -107,29 +144,28 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_startServer(
             }
         },
     };
-    match bridge::start_server(port, max_connections as usize, bind) {
+    let kcp_profile = resolve_profile(optional_string(&mut env, &profile, "startServer"));
+    match bridge::start_server(kind, port, max_connections as usize, bind, kcp_profile) {
         Ok(id) => id as jlong,
-        Err(msg) => {
-            bridge::report_error(msg);
+        Err(err) => {
+            bridge::report_error(err.message());
             -1
         }
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_serverPort(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_serverPort(
     _env: EnvUnowned,
     _class: JClass,
     server: jlong,
 ) -> jint {
-    bridge::server_port(server as u64)
-        .map(|p| p as jint)
-        .unwrap_or(-1)
+    bridge::server_port(server as u64).map(|p| p as jint).unwrap_or(-1)
 }
 
 /// 查询连接对端地址（"ip:port"）；客户端连接或不存在返回 null。
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_remoteAddress(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_remoteAddress(
     mut env: EnvUnowned,
     _class: JClass,
     conn: jlong,
@@ -145,7 +181,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_remoteAddress
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_acceptConnections(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_acceptConnections(
     mut env: EnvUnowned,
     _class: JClass,
     server: jlong,
@@ -166,7 +202,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_acceptConnect
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_stopServer(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_stopServer(
     _env: EnvUnowned,
     _class: JClass,
     server: jlong,
@@ -175,12 +211,17 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_stopServer(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_connect(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_connect(
     mut env: EnvUnowned,
     _class: JClass,
+    kind: jint,
     host: JString,
     port: jint,
+    profile: JString,
 ) -> jlong {
+    let Some(kind) = resolve_kind(kind, "connect") else {
+        return -1;
+    };
     let Some(host) = resolve_default(
         env.with_env(|env| Ok::<_, Error>(Some(host.try_to_string(env)?))),
         "connect",
@@ -192,17 +233,19 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_connect(
         bridge::report_error(format!("invalid remote port {port}"));
         return -1;
     };
-    match bridge::connect(&host, port) {
+    let kcp_profile = resolve_profile(optional_string(&mut env, &profile, "connect"));
+    match bridge::connect(kind, &host, port, kcp_profile) {
         Ok(id) => id as jlong,
-        Err(msg) => {
-            bridge::report_error(msg);
+        Err(err) => {
+            bridge::report_error(err.message());
             -1
         }
     }
 }
 
+/// 查询连接状态；不存在时 native 层已返回 -1（Java 映射 UNKNOWN）。
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_connectionState(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_connectionState(
     _env: EnvUnowned,
     _class: JClass,
     conn: jlong,
@@ -213,7 +256,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_connectionSta
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_closeConnection(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_closeConnection(
     _env: EnvUnowned,
     _class: JClass,
     conn: jlong,
@@ -222,7 +265,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_closeConnecti
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_writeChunk(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_writeChunk(
     mut env: EnvUnowned,
     _class: JClass,
     conn: jlong,
@@ -268,15 +311,15 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_writeChunk(
     // Vec<u8> → Bytes 为零成本接管分配，无拷贝。
     match bridge::write_chunk(conn as u64, bytes.into()) {
         Ok(n) => n as jint,
-        Err(msg) => {
-            bridge::report_error(msg);
+        Err(err) => {
+            bridge::report_error(err.message());
             -1
         }
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_readChunk(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_readChunk(
     mut env: EnvUnowned,
     _class: JClass,
     conn: jlong,
@@ -303,7 +346,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_readChunk(
 /// 不得依赖 position 定位。返回值：读取字节数；0 = 暂无数据；
 /// -1 = 连接不存在/已关闭或参数非法（与 Java 侧声明一致）。
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_readChunkInto(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_readChunkInto(
     mut env: EnvUnowned,
     _class: JClass,
     conn: jlong,
@@ -337,12 +380,9 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_QuicNative_readChunkInto
             dst[..n].copy_from_slice(&bytes);
             n as jint
         }
-        Err(msg) => {
-            bridge::report_error(msg);
+        Err(err) => {
+            bridge::report_error(err.message());
             -1
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
