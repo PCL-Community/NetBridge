@@ -96,7 +96,92 @@ fn kcp_loopback_roundtrip() {
     stop_server(server);
 }
 
-/// 对端关闭传播（smux 路径）：服务端 close → FIN → 客户端读侧 EOF 感知。
+/// 长稳回归：活跃 15s 后**完全静默 45s**，再恢复读写。
+/// 复现目标：静默期内会话被某侧提前关闭（日志中的 ~20-30s 掉线模式）。
+#[test]
+fn kcp_sustained_and_idle_phase() {
+    let server = start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
+        .expect("start kcp server");
+    let port = server_port(server).expect("kcp server port");
+    let client =
+        connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced).expect("kcp connect");
+
+    // 活跃期：每秒双向一笔小负载，验证数据面正常。
+    let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+    assert_eq!(
+        write_chunk(client, Bytes::from(payload.clone())).expect("client write"),
+        payload.len()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let accepted = loop {
+        let a = accept_connections(server);
+        if !a.is_empty() {
+            break a;
+        }
+        assert!(Instant::now() < deadline, "timeout waiting for kcp accept");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let server_conn = accepted[0];
+
+    let mut round = 0u32;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(1000));
+        round += 1;
+        let msg = format!("active-{round}").into_bytes();
+        assert_eq!(
+            write_chunk(client, Bytes::copy_from_slice(&msg)).expect("cli write"),
+            msg.len()
+        );
+        wait_read(server_conn, msg.len());
+        assert_eq!(
+            write_chunk(server_conn, Bytes::copy_from_slice(&msg)).expect("srv write"),
+            msg.len()
+        );
+        wait_read(client, msg.len());
+        assert_eq!(
+            connection_state(client),
+            Some(STATE_CONNECTED),
+            "client died at round {round}"
+        );
+        assert_eq!(
+            connection_state(server_conn),
+            Some(STATE_CONNECTED),
+            "server died at round {round}"
+        );
+    }
+
+    // 静默期：45s 无任何写入。smux keep-alive(10s/30s) 与 KCP session_expire(90s)
+    // 都不能在此窗口击杀尚存链路。
+    std::thread::sleep(Duration::from_secs(45));
+    assert_eq!(
+        connection_state(client),
+        Some(STATE_CONNECTED),
+        "client died during idle phase"
+    );
+    assert_eq!(
+        connection_state(server_conn),
+        Some(STATE_CONNECTED),
+        "server died during idle phase"
+    );
+
+    // 恢复：双向必须仍可投递。
+    let msg = b"resume-after-idle";
+    assert_eq!(
+        write_chunk(client, Bytes::copy_from_slice(msg)).expect("cli resume"),
+        msg.len()
+    );
+    wait_read(server_conn, msg.len());
+    assert_eq!(
+        write_chunk(server_conn, Bytes::copy_from_slice(msg)).expect("srv resume"),
+        msg.len()
+    );
+    wait_read(client, msg.len());
+
+    close_connection(client);
+    stop_server(server);
+}
+
 #[test]
 fn kcp_peer_close_propagates_to_client() {
     let server = start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)

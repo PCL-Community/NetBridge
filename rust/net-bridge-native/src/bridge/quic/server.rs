@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::connection::run_connection;
 use crate::bridge::error::{BridgeError, Transport};
 use crate::bridge::registry::{allocate_id, remove_conn, runtime, servers};
-use crate::bridge::socket_util;
 use crate::bridge::server_ops::register_connection;
-use crate::bridge::{try_admit, ServerHandle, STATE_FAILED, TransportEndpoint};
+use crate::bridge::socket_util;
+use crate::bridge::{STATE_FAILED, ServerHandle, TransportEndpoint, try_admit};
 
 /// 启动服务端 QUIC acceptor（端口 0 表示由系统分配）。
 ///
@@ -40,8 +40,12 @@ pub fn start_server(
         let _guard = rt.enter();
         // socket2 统一底座：显式双栈 + 4MB 缓冲 + REUSEADDR；
         // bind=None 时 v6 双栈失败自动回退 IPv4-only，错误信息含两个原因。
-        let (socket, _local) = socket_util::bind_server(port, bind)
-            .map_err(|source| BridgeError::Bind { transport: Transport::Quic, port, source })?;
+        let (socket, _local) =
+            socket_util::bind_server(port, bind).map_err(|source| BridgeError::Bind {
+                transport: Transport::Quic,
+                port,
+                source,
+            })?;
         quinn::Endpoint::new(
             quinn::EndpointConfig::default(),
             Some(server_config),

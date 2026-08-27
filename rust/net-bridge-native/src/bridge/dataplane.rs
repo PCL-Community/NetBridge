@@ -55,8 +55,7 @@ pub fn write_chunk(conn: u64, data: Bytes) -> Result<usize, BridgeError> {
     };
     // early_write：KCP 客户端连接期即可写（首帧入站才置 CONNECTED，
     // 出站若同门控会与服务端"按首包建会话"互等死锁）。
-    let writable =
-        handle.state.load(Ordering::SeqCst) == STATE_CONNECTED || handle.early_write;
+    let writable = handle.state.load(Ordering::SeqCst) == STATE_CONNECTED || handle.early_write;
     let to_transport = handle.to_transport.clone();
     drop(handle);
     if !writable {

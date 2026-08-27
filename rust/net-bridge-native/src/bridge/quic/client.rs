@@ -61,7 +61,11 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
                 fail(
                     conn_id,
                     &state,
-                    BridgeError::Dns { host: host.clone(), port, source },
+                    BridgeError::Dns {
+                        host: host.clone(),
+                        port,
+                        source,
+                    },
                 );
                 return;
             }
@@ -74,7 +78,11 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
                 fail(
                     conn_id,
                     &state,
-                    BridgeError::Setup { transport: Transport::Quic, stage: "client bind", source: e },
+                    BridgeError::Setup {
+                        transport: Transport::Quic,
+                        stage: "client bind",
+                        source: e,
+                    },
                 );
                 return;
             }
@@ -90,7 +98,11 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
                 fail(
                     conn_id,
                     &state,
-                    BridgeError::Setup { transport: Transport::Quic, stage: "endpoint", source: e },
+                    BridgeError::Setup {
+                        transport: Transport::Quic,
+                        stage: "endpoint",
+                        source: e,
+                    },
                 );
                 return;
             }
@@ -104,7 +116,11 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
                     fail(
                         conn_id,
                         &state,
-                        BridgeError::Connect { transport: Transport::Quic, addr, source: Box::new(e) },
+                        BridgeError::Connect {
+                            transport: Transport::Quic,
+                            addr,
+                            source: Box::new(e),
+                        },
                     );
                     return;
                 }
@@ -114,7 +130,11 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
                 fail(
                     conn_id,
                     &state,
-                    BridgeError::Connect { transport: Transport::Quic, addr, source: Box::new(e) },
+                    BridgeError::Connect {
+                        transport: Transport::Quic,
+                        addr,
+                        source: Box::new(e),
+                    },
                 );
                 return;
             }
@@ -125,14 +145,25 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
                 fail(
                     conn_id,
                     &state,
-                    BridgeError::Connect { transport: Transport::Quic, addr, source: Box::new(e) },
+                    BridgeError::Connect {
+                        transport: Transport::Quic,
+                        addr,
+                        source: Box::new(e),
+                    },
                 );
                 return;
             }
         };
         state.store(crate::bridge::STATE_CONNECTED, Ordering::SeqCst);
         run_connection(
-            conn_id, conn, send, recv, to_transport_rx, to_java_tx, to_transport_tx, state,
+            conn_id,
+            conn,
+            send,
+            recv,
+            to_transport_rx,
+            to_java_tx,
+            to_transport_tx,
+            state,
         )
         .await;
     });

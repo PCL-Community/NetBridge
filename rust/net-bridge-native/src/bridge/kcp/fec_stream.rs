@@ -1,18 +1,9 @@
 //! FECStream：可靠流之上的 RS(255,223) 块纠错中间层。
 //!
-//! 线上单元 = 单个 RS 码字（[`CODEWORD_LEN`] 字节），消息区
-//! （[`MESSAGE_LEN`] 字节）布局为 `[len:u16 BE][payload ≤ 221B][零填充]`。
-//! **整条链路上没有未保护字节**——长度字段损坏同样被 RS 纠正。
-//!
-//! 职责边界：
-//! - 处理"穿透 UDP 校验和的静默数据损坏"：每码字 ≤16 字节错误原地纠正；
-//!   超限解码失败 → `InvalidData`，此后连接进入毒化态（所有读写报错，
-//!   由调用方置 FAILED 收尾）。
-//! - 不处理丢包——那由下层 KCP 重传负责；本层不引入分组/等待。
-//!
-//! 实现为标准 `AsyncRead`/`AsyncWrite`：会话循环可经 [`tokio::io::split`]
-//! 拆成读写两半（QUIC 路径同构）。写语义为缓冲式——`poll_write` 仅入累积
-//! 器并尽力冲刷即计数成功；错误经毒化标记在后续操作中浮现。
+//! 码字 = 消息区（`[len:u16 BE][payload ≤ 221B][零填充]`）+ 校验位，整条链
+//! 路无未保护字节。解码超限（>t=16B 错误）即毒化：后续读写全报
+//! InvalidData，由调用方置 FAILED 收尾。丢包不归本层——下层 KCP 重传
+//! 负责。实现为标准 `AsyncRead`/`AsyncWrite`，可 `split` 接入会话循环。
 
 use std::io;
 use std::pin::Pin;
@@ -105,8 +96,7 @@ impl<Io: AsyncRead + Unpin> FecStream<Io> {
                 let result = self.decoder.decode(&self.rcw, &mut self.rplain);
                 match result {
                     Ok(_corrected) => {
-                        let len =
-                            u16::from_be_bytes([self.rplain[0], self.rplain[1]]) as usize;
+                        let len = u16::from_be_bytes([self.rplain[0], self.rplain[1]]) as usize;
                         if len > PAYLOAD_CAP {
                             self.poisoned = true;
                             return Poll::Ready(Err(Self::poison(
@@ -208,8 +198,7 @@ impl<Io: AsyncWrite + Unpin> AsyncWrite for FecStream<Io> {
         }
         // 入累积器；满块即刻编码并尝试冲刷（失败留在 pending，后续恢复）。
         let accept = (PAYLOAD_CAP - this.wfill).min(buf.len());
-        this.wmsg[2 + this.wfill..2 + this.wfill + accept]
-            .copy_from_slice(&buf[..accept]);
+        this.wmsg[2 + this.wfill..2 + this.wfill + accept].copy_from_slice(&buf[..accept]);
         this.wfill += accept;
         if this.wfill == PAYLOAD_CAP {
             let cw = this.encode_accumulated();
@@ -220,10 +209,7 @@ impl<Io: AsyncWrite + Unpin> AsyncWrite for FecStream<Io> {
         Poll::Ready(Ok(accept))
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if this.poisoned {
             return Poll::Ready(Err(Self::poison(
@@ -307,7 +293,7 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, ReadBuf};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf, duplex};
 
     /// 读侧损坏注入器：对经过的字节流按**绝对偏移**注入翻转——第 `block`
     /// 块内第 `i` 个翻转点位于 `block * 255 + (i * 37 + 11) % 255`
@@ -364,7 +350,9 @@ mod tests {
         let (mut tx, mut rx) = (FecStream::new(a), FecStream::new(b));
 
         tx.write_all(b"hello fec").await.expect("send small");
-        tx.write_all(&vec![0xABu8; PAYLOAD_CAP * 3 + 17]).await.expect("send multi");
+        tx.write_all(&vec![0xABu8; PAYLOAD_CAP * 3 + 17])
+            .await
+            .expect("send multi");
         tx.flush().await.expect("flush tail");
 
         let mut out = vec![0u8; 9];
@@ -382,7 +370,12 @@ mod tests {
     async fn corrects_intra_block_corruption() {
         // 每块 8 字节翻转（< t=16）：必须原样纠回。
         let (a, b) = duplex(64 * 1024);
-        let corrupted = CorruptRead { inner: a, blocks: 4, flips_per_block: 8, pos: 0 };
+        let corrupted = CorruptRead {
+            inner: a,
+            blocks: 4,
+            flips_per_block: 8,
+            pos: 0,
+        };
         let (mut tx, mut rx) = (FecStream::new(b), FecStream::new(corrupted));
 
         let payload: Vec<u8> = (0..PAYLOAD_CAP * 2 + 100).map(|i| i as u8).collect();
@@ -390,7 +383,9 @@ mod tests {
         tx.flush().await.expect("flush");
 
         let mut got = vec![0u8; payload.len()];
-        rx.read_exact(&mut got).await.expect("recv under corruption");
+        rx.read_exact(&mut got)
+            .await
+            .expect("recv under corruption");
         assert_eq!(got, payload, "RS 必须把 ≤t 的损坏原样纠回");
     }
 
@@ -398,7 +393,12 @@ mod tests {
     async fn fails_when_corruption_exceeds_capability() {
         // 首块 40 字节翻转（>> t=16）：解码必须毒化报 InvalidData 而非吐脏数据。
         let (a, b) = duplex(64 * 1024);
-        let corrupted = CorruptRead { inner: a, blocks: 1, flips_per_block: 40, pos: 0 };
+        let corrupted = CorruptRead {
+            inner: a,
+            blocks: 1,
+            flips_per_block: 40,
+            pos: 0,
+        };
         let (mut tx, mut rx) = (FecStream::new(b), FecStream::new(corrupted));
 
         tx.write_all(&vec![7u8; 400]).await.expect("send");

@@ -38,8 +38,11 @@ pub fn stop_server(server: u64) -> bool {
         }
     }
     // 先收集后修改：不在 DashMap 迭代期间变更同一 map。
-    let conn_ids: Vec<u64> =
-        conns().iter().filter(|e| e.server_id == Some(server)).map(|e| *e.key()).collect();
+    let conn_ids: Vec<u64> = conns()
+        .iter()
+        .filter(|e| e.server_id == Some(server))
+        .map(|e| *e.key())
+        .collect();
     for id in conn_ids {
         if let Some(h) = conns().get_mut(&id) {
             h.state.store(STATE_CLOSED, Ordering::SeqCst);

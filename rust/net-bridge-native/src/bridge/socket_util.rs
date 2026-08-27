@@ -70,10 +70,7 @@ pub fn bind_server(port: u16, bind: Option<IpAddr>) -> io::Result<(UdpSocket, So
                     let v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
                     let s = bind_socket(v4, true).map_err(|v4_err| {
                         // 合并两个原因：上层日志一次可见全貌（与原实现一致）。
-                        io::Error::new(
-                            v4_err.kind(),
-                            format!("v6: {v6_err}; v4: {v4_err}"),
-                        )
+                        io::Error::new(v4_err.kind(), format!("v6: {v6_err}; v4: {v4_err}"))
                     })?;
                     let local = s.local_addr()?;
                     Ok((s, local))
@@ -107,8 +104,7 @@ mod tests {
 
     #[test]
     fn server_bind_specific_v4() {
-        let (_sock, addr) =
-            bind_server(0, Some(IpAddr::V4(Ipv4Addr::LOCALHOST))).expect("bind v4");
+        let (_sock, addr) = bind_server(0, Some(IpAddr::V4(Ipv4Addr::LOCALHOST))).expect("bind v4");
         assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 

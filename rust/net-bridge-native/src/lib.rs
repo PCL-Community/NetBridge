@@ -81,11 +81,7 @@ fn resolve_profile(profile: Option<String>) -> bridge::kcp::config::KcpProfile {
 }
 
 /// 读取可选字符串参数（null → None）。
-fn optional_string(
-    env: &mut EnvUnowned,
-    value: &JString,
-    context: &str,
-) -> Option<String> {
+fn optional_string(env: &mut EnvUnowned, value: &JString, context: &str) -> Option<String> {
     resolve_default(
         env.with_env(|env| {
             if value.is_null() {
@@ -160,7 +156,9 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_serverPort(
     _class: JClass,
     server: jlong,
 ) -> jint {
-    bridge::server_port(server as u64).map(|p| p as jint).unwrap_or(-1)
+    bridge::server_port(server as u64)
+        .map(|p| p as jint)
+        .unwrap_or(-1)
 }
 
 /// 查询连接对端地址（"ip:port"）；客户端连接或不存在返回 null。

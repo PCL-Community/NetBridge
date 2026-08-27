@@ -1,12 +1,8 @@
 //! KCP 参数预设：balanced / aggressive 二档，不支持自定义。
 //!
-//! 公共固定：`mtu=1300`、`wnd=(256,256)`、`stream=true`（字节流管道语义）、
-//! `session_expire=90s`（对端消失的服务端侧回收）、`connect_timeout=8s`
-//! （黑洞握手尽早失败，先于 Java 侧 10s watchdog 给出结果）、
-//! `session_id_len=16`（SYN 握手随机会话 id）。
-//!
-//! 握手模型（kcp-rs）：客户端 `connect` 发 SYN 等确认，服务端按 session id
-//! 建会话——`KcpStream::connect` 返回即双向可达，无需自定义探测帧。
+//! 公共固定：mtu=1300、wnd=(256,256)、stream=true、session_expire=90s、
+//! connect_timeout=8s（黑洞握手尽早失败，先于 Java 侧 10s watchdog）。
+//! 两端同值锁定；会话 id 随机制作（session_id_len=16）。
 
 use std::time::Duration;
 

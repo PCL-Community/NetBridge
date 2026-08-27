@@ -4,8 +4,8 @@
 //! 状态查询与批量字节读写对所有传输一致，实现在注册表层
 //! （[`dataplane`]/[`server_ops`]），随 QUIC 模块文件一并维护。
 
-pub mod error;
 mod dataplane;
+pub mod error;
 pub mod kcp;
 mod quic;
 mod registry;
@@ -19,8 +19,8 @@ pub use error::BridgeError;
 // 数据面原语传输无关：状态/读写/关闭按 ConnHandle 通道与状态原子实现。
 pub use dataplane::{close_connection, connection_state, read_chunk, write_chunk};
 // 服务端句柄原语传输无关：端口/停止/上报与连接登记器。
-pub use server_ops::{accept_connections, server_port, stop_server};
 pub use registry::{conn_remote_addr, report_error};
+pub use server_ops::{accept_connections, server_port, stop_server};
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
