@@ -81,19 +81,50 @@ class TransportSelectorTest {
     }
 
     @Test
-    void fallbackMemoryShortCircuitsAttempts() {
+    void successCacheTakesPriorityOverAdvertisement() {
         InetSocketAddress addr = addr();
         ClientConfig.setMode(TransportMode.QUIC);
         TransportSelector.record(addr, NetworksAbility.of(
                 new NetworksEntry(true, null, 2443, "net-bri-quic/1")));
-        FallbackTracker.mark(addr);
+        // 模拟成功建连后的缓存：端点与宣告不同，缓存应优先。
+        FallbackTracker.record(addr,
+                new TransportTarget(TransportMode.QUIC, new InetSocketAddress("1.2.3.4", 9999)));
 
         Optional<TransportTarget> target = TransportSelector.decide(addr);
-        assertFalse(target.isPresent(), "TTL 命中应跳过全部加速尝试");
+        assertTrue(target.isPresent());
+        assertEquals(9999, target.get().endpoint().getPort(), "TTL 内同传输缓存端点优先于宣告");
+        assertEquals("1.2.3.4", target.get().endpoint().getHostString());
+    }
 
-        // TTL 过期后重新执行完整序列。
-        FallbackTracker.clear();
-        assertTrue(TransportSelector.decide(addr).isPresent(), "过期后应重新尝试加速传输");
+    @Test
+    void staleCacheFallsBackToAdvertisement() {
+        InetSocketAddress addr = addr();
+        ClientConfig.setMode(TransportMode.QUIC);
+        TransportSelector.record(addr, NetworksAbility.of(
+                new NetworksEntry(true, null, 2443, "net-bri-quic/1")));
+        FallbackTracker.record(addr,
+                new TransportTarget(TransportMode.QUIC, new InetSocketAddress("1.2.3.4", 9999)));
+        FallbackTracker.clear(); // 模拟 TTL 过期
+
+        Optional<TransportTarget> target = TransportSelector.decide(addr);
+        assertTrue(target.isPresent());
+        assertEquals(2443, target.get().endpoint().getPort(), "缓存过期后重新走宣告协商");
+    }
+
+    @Test
+    void cacheIgnoredWhenModeDiffers() {
+        InetSocketAddress addr = addr();
+        ClientConfig.setMode(TransportMode.KCP);
+        // 缓存是 QUIC（上次成功），当前切到 KCP：不得复用缓存，走 KCP 宣告。
+        FallbackTracker.record(addr,
+                new TransportTarget(TransportMode.QUIC, new InetSocketAddress("1.2.3.4", 9999)));
+        TransportSelector.record(addr, NetworksAbility.of(
+                new NetworksEntry(true, null, 2444, "net-bri-kcp/1")));
+
+        Optional<TransportTarget> target = TransportSelector.decide(addr);
+        assertTrue(target.isPresent());
+        assertEquals(TransportMode.KCP, target.get().mode());
+        assertEquals(2444, target.get().endpoint().getPort(), "换传输后立即生效，不被旧缓存锁死");
     }
 
     @Test

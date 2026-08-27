@@ -11,6 +11,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.neoforge.mc.NativeClientTransport;
 import top.tangge233.netbridge.transport.ClientConfig;
+import top.tangge233.netbridge.transport.ConnectionDisplay;
 import top.tangge233.netbridge.transport.TransportMode;
 import top.tangge233.netbridge.transport.TransportSelector;
 import top.tangge233.netbridge.transport.TransportTarget;
@@ -38,6 +39,8 @@ public abstract class ConnectionMixin {
         if (Boolean.TRUE.equals(NETBRIDGE_IN_PROGRESS.get())) {
             return;
         }
+        // 新连接开始即清除旧显示：TCP 直连路径不 set 不覆盖，残留会让 F3 显示上次传输。
+        ConnectionDisplay.clear();
         TransportMode mode = ClientConfig.mode();
         var targetOpt = TransportSelector.decide(address);
         if (targetOpt.isEmpty()) {

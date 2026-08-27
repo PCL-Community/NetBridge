@@ -55,6 +55,7 @@ public final class NativeClientTransport {
             try {
                 future.syncUninterruptibly();
                 ConnectStatus.clear();
+                FallbackTracker.record(tcpAddress, target);
                 ConnectionDisplay.set(
                         target.mode().name(), target.endpoint().getHostString() + ":" + target.endpoint().getPort());
                 return future;
@@ -65,8 +66,7 @@ public final class NativeClientTransport {
                         tcpAddress, target.mode(), attempt, t.getMessage());
             }
         }
-        // 两次均失败：记入降级记忆，本次走原版 TCP。
-        FallbackTracker.mark(tcpAddress);
+        // 两次均失败：本次走原版 TCP。
         NetBridge.LOGGER.warn("Transport {} to {} failed twice ({}), falling back to TCP",
                 target.mode(), tcpAddress, last == null ? "unknown" : last.getMessage());
         ConnectStatus.fallingBack();

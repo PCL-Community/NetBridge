@@ -15,7 +15,7 @@ import top.tangge233.netbridge.ability.NetworksEntry;
  * <p>决策规则（顺序即优先级）：
  * <ol>
  *   <li>mode = tcp → 直接 TCP；</li>
- *   <li>降级记忆命中（TTL 内曾回退）→ 直接 TCP，不发起任何加速尝试；</li>
+ *   <li>成功缓存命中（TTL 内同传输成功建连）→ 直接复用缓存端点；</li>
  *   <li>目标传输未宣告 / 协议不支持 → 直接 TCP（不做其他加速传输的替代协商）；</li>
  *   <li>否则返回合成端点（host 缺省跟随 ping 目标地址）。</li>
  * </ol>
@@ -64,9 +64,11 @@ public final class TransportSelector {
         if (mode == TransportMode.TCP || tcpAddress == null) {
             return Optional.empty();
         }
-        if (FallbackTracker.isTracked(tcpAddress)) {
-            NetBridge.LOGGER.info("Transport for {}: TCP (recent fallback within TTL)", tcpAddress);
-            return Optional.empty();
+        // 5 分钟内同一传输成功建连过：直接复用缓存端点，跳过宣告协商。
+        Optional<TransportTarget> cached = FallbackTracker.lookup(tcpAddress);
+        if (cached.isPresent() && cached.get().mode() == mode) {
+            NetBridge.LOGGER.info("Transport for {}: {} (cached endpoint)", tcpAddress, mode);
+            return cached;
         }
         NetworksAbility networks = networksFor(tcpAddress);
         String name = mode == TransportMode.QUIC
