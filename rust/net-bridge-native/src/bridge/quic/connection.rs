@@ -52,6 +52,8 @@ pub async fn run_connection(
                         if to_java_tx.send(chunk.bytes).await.is_err() {
                             break;
                         }
+                        // 数据已入 Java 队列：反向通知唤醒 EventLoop 立即读，免轮询等待。
+                        crate::notify_data(conn_id);
                     }
                     Ok(None) => break,
                     Err(_) => break,

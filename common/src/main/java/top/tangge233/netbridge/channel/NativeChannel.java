@@ -16,6 +16,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -34,7 +35,9 @@ import top.tangge233.netbridge.transport.ClientConfig;
  *   <li>写：{@link #doWrite} 把出站 ByteBuf 拷进复用 byte[]，经
  *       {@link NativeBridge#writeChunk} 入队；队列满时消息保留在 outbound buffer，
  *       由轮询器稍后重试（背压，不丢包）。</li>
- *   <li>读：事件循环上按自适应间隔轮询，优先经
+ *   <li>读：Rust 数据到达经 JNI 反向通知（{@code NativeBridge.onDataAvailable}），
+ *       在 EventLoop 上立即拉取推送管线；轮询器降级为兜底（通知丢失/状态检测/
+ *       写重试），退避见 {@link #BACKOFF_STEPS_MS}。读取优先经
  *       {@link NativeBridge#readChunkInto} 直写池化 direct buffer，
  *       {@code fireChannelRead} 推入管道。</li>
  *   <li>连接：{@link NativeBridge#connect} 异步建立，连接 promise 在
@@ -50,11 +53,24 @@ public class NativeChannel extends AbstractChannel {
 
     private static final ChannelMetadata METADATA = new ChannelMetadata(false, 16);
     /** 基础轮询间隔与退避步进序列（毫秒）；末值为上限。 */
-    private static final long[] BACKOFF_STEPS_MS = {5, 10, 20, 40};
+    private static final long[] BACKOFF_STEPS_MS = {20, 50, 100};
     /** 单次 poll 的读取轮数上限：剩余数据留在原生队列下轮再取，防止持续灌流的远端独占 EventLoop。 */
     private static final int MAX_READS_PER_POLL = 16;
+    /** drainRead 单次唤醒的最大读取轮数：洪峰时让出 EventLoop 重新调度，避免独占。 */
+    private static final int MAX_DRAIN_ROUNDS = 4;
     /** 出站暂存区增长上限：更大的包（罕见）按需一次性精确分配，不常驻。 */
     private static final int MAX_SCRATCH_BYTES = 1024 * 1024;
+
+    /**
+     * connId → channel 注册表：Rust 数据到达通知（onDataAvailable）按 id 定位
+     * channel 并在其 EventLoop 上触发立即读。连接关闭时移除。
+     */
+    private static final ConcurrentHashMap<Long, NativeChannel> CHANNELS = new ConcurrentHashMap<>();
+
+    /** 按连接 id 取 channel；未知（未注册/已关闭）返回 null。 */
+    public static NativeChannel channelFor(long connId) {
+        return CHANNELS.get(connId);
+    }
 
     // InetSocketAddress 不可变，全通道共享常量，避免每次连接分配。
     private static final InetSocketAddress ADOPT_REMOTE_ADDRESS = new InetSocketAddress("0.0.0.0", 0);
@@ -87,6 +103,8 @@ public class NativeChannel extends AbstractChannel {
     private volatile ScheduledFuture<?> pollTask;
     private volatile long pollDelayMs = BACKOFF_STEPS_MS[0];
     private volatile ChannelPromise connectPromise;
+    /** 数据到达唤醒令牌：Rust 通知置位，drainRead 消费；保证每连接最多一个在途唤醒。 */
+    private final AtomicBoolean pendingWake = new AtomicBoolean();
 
     public NativeChannel() {
         this(false);
@@ -112,6 +130,7 @@ public class NativeChannel extends AbstractChannel {
         channel.connId = connId;
         channel.connected = true;
         channel.remoteAddress = resolveRemoteAddress(connId);
+        CHANNELS.put(connId, channel);
         return channel;
     }
 
@@ -185,6 +204,7 @@ public class NativeChannel extends AbstractChannel {
         long id = connId;
         connId = -1;
         if (id >= 0) {
+            CHANNELS.remove(id);
             NativeBridge.closeConnection(id);
         }
         ChannelPromise p = connectPromise;
@@ -199,6 +219,50 @@ public class NativeChannel extends AbstractChannel {
         readRequested = true;
         if (pollTask == null && connId >= 0) {
             startPoller(null);
+        }
+    }
+
+    /**
+     * Rust 数据到达唤醒（任意线程）：去抖后在 EventLoop 上立即读，替代轮询等待。
+     * 未注册到 EventLoop 时放弃——数据留在 native 队列，轮询兜底读取。
+     */
+    public void wakeupRead() {
+        if (!pendingWake.compareAndSet(false, true)) {
+            return;
+        }
+        EventLoop loop = eventLoop();
+        if (loop == null) {
+            pendingWake.set(false);
+            return;
+        }
+        loop.execute(this::drainRead);
+    }
+
+    /**
+     * EventLoop 上立即读：循环读到无数据为止，期间新通知就地消费；
+     * 洪峰超上限让出重排，不独占 EventLoop。
+     */
+    private void drainRead() {
+        pendingWake.set(false);
+        if (closed.get() || connId < 0 || !connected) {
+            return;
+        }
+        boolean any = true;
+        int rounds = 0;
+        while (any && rounds < MAX_DRAIN_ROUNDS) {
+            if (!(config().isAutoRead() || readRequested)) {
+                break;
+            }
+            readRequested = false;
+            any = readNow();
+            rounds++;
+            if (pendingWake.get()) {
+                pendingWake.set(false);
+            }
+        }
+        if (any || pendingWake.get()) {
+            // 数据未完或新通知又至：让出 EventLoop 后继续，避免霸占。
+            eventLoop().execute(this::drainRead);
         }
     }
 
@@ -507,6 +571,7 @@ public class NativeChannel extends AbstractChannel {
                     return;
                 }
                 connId = id;
+                CHANNELS.put(id, NativeChannel.this);
                 startPoller(promise);
             } catch (Throwable t) {
                 promise.tryFailure(t);

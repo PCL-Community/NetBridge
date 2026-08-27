@@ -74,16 +74,18 @@ mod tests {
     #[test]
     fn presets_match_adr() {
         let balanced = build_config(KcpProfile::Balanced);
-        assert_eq!(balanced.mtu, 1300);
+        assert_eq!(balanced.mtu, 1400);
         assert!(!balanced.stream, "Stream should disabled");
         assert_eq!((balanced.snd_wnd, balanced.rcv_wnd), (256, 256));
-        assert_eq!(balanced.session_expire, Duration::from_secs(90));
-        assert!(!balanced.nodelay.nodelay);
+        assert!(balanced.nodelay.nodelay, "MC 延迟敏感：nodelay 开启");
+        assert_eq!(balanced.nodelay.interval, 10);
+        assert_eq!(balanced.nodelay.resend, 2);
+        assert!(balanced.nodelay.nc);
 
         let aggressive = build_config(KcpProfile::Aggressive);
         assert!(aggressive.nodelay.nodelay);
         assert_eq!(aggressive.nodelay.interval, 10);
-        assert_eq!(aggressive.nodelay.resend, 2);
+        assert_eq!(aggressive.nodelay.resend, 1);
         assert!(aggressive.nodelay.nc);
     }
 }

@@ -140,6 +140,8 @@ async fn reader_loop(
                 if to_java_tx.send(payload.split().freeze()).await.is_err() {
                     break true;
                 }
+                // 数据已入 Java 队列：反向通知唤醒 EventLoop 立即读，免轮询等待。
+                crate::notify_data(conn_id);
             }
             Err(_) if state.load(Ordering::SeqCst) == STATE_CLOSED => break true,
             Err(e) if is_session_closed(&e) => break true, // 会话关闭：干净收尾。

@@ -106,11 +106,21 @@ public final class NativeLoader {
         }
         try {
             verifyAbi();
+            registerNotify();
         } catch (RuntimeException e) {
             NetBridge.LOGGER.error("net-bridge native ABI check failed: {}", e.getMessage());
             return false;
         }
         return true;
+    }
+
+    /** 注册数据到达回调；失败仅记日志（轮询兜底仍在，不阻断启动）。 */
+    private static void registerNotify() {
+        try {
+            NativeBridge.registerNotifyCallback();
+        } catch (Throwable t) {
+            NetBridge.LOGGER.warn("net-bridge notify callback registration failed: {}", t.toString());
+        }
     }
 
     /** 校验 native ABI 版本；不匹配即抛出并记录双方版本号。 */

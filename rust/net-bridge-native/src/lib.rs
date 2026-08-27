@@ -9,19 +9,61 @@
 //! JNI 层（jni 0.22）：导出函数收 FFI 安全的 [`EnvUnowned`]，需要访问 JNI
 //! 时经 `with_env` 升级为 `&mut Env`；闭包被 catch_unwind 包裹，panic 不会
 //! 穿越原生方法边界 abort 宿主进程。错误统一记 stderr 日志并返回默认值。
+//!
+//! 反向通知：数据到达时由 tokio 线程回调 Java `NativeBridge.onDataAvailable`，
+//! 仅作唤醒信号（实际读取在 Java 侧 EventLoop 上执行），消除 Java 侧轮询
+//! 等待。回调未注册（单测/旧流程）时静默跳过，Java 轮询兜底仍在。
 
 pub mod bridge;
 pub mod transport;
 
+use std::sync::OnceLock;
+
 use jni::errors::Error;
-use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
+use jni::ids::JStaticMethodID;
+use jni::objects::{Global, JByteArray, JByteBuffer, JClass, JString, JValue};
+use jni::signature::{Primitive, ReturnType};
 use jni::sys::{jboolean, jbyte, jbyteArray, jint, jlong, jlongArray, jstring};
-use jni::{Env, EnvOutcome, EnvUnowned, Outcome};
+use jni::{Env, EnvOutcome, EnvUnowned, JavaVM, Outcome, jni_sig, jni_str};
 
 use bridge::error::BridgeError;
 use transport::TransportKind;
 
-pub const NET_BRIDGE_ABI_VERSION: &str = "0.2.0";
+pub const NET_BRIDGE_ABI_VERSION: &str = "0.3.0";
+
+/// 反向通知回调目标：NativeBridge 类 GlobalRef + `onDataAvailable(J)V` 方法 id。
+/// 两类句柄均为 JNI 规范允许跨线程使用的不透明引用（Send+Sync）。
+static NOTIFY: OnceLock<NotifyTarget> = OnceLock::new();
+
+struct NotifyTarget {
+    class: Global<JClass<'static>>,
+    method: JStaticMethodID,
+}
+
+/// 数据到达通知（tokio 线程调用）：回调 Java `onDataAvailable(connId)`。
+/// 未注册回调（单测/旧流程）或 attach 失败时静默跳过——Java 轮询兜底。
+pub(crate) fn notify_data(conn_id: u64) {
+    let Some(target) = NOTIFY.get() else {
+        return;
+    };
+    let Ok(vm) = JavaVM::singleton() else {
+        return;
+    };
+    let _ = vm.attach_current_thread(|env| {
+        let arg = JValue::Long(conn_id as i64).as_jni();
+        // SAFETY: method id 来自 get_static_method_id，class 由 GlobalRef 持有；
+        // args 指向本调用栈上的 jvalue。
+        unsafe {
+            env.call_static_method_unchecked(
+                &target.class,
+                target.method,
+                ReturnType::Primitive(Primitive::Void),
+                &[arg],
+            )
+        }
+        .map(|_| ())
+    });
+}
 
 /// 统一解析 `with_env` 结果：Err/panic 记日志并返回调用方指定的默认值
 /// （错误返回 -1/null 的 ABI 契约，细节见 net-bridge-native 日志）。
@@ -142,6 +184,29 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_version(
         "version",
         std::ptr::null_mut,
     )
+}
+
+/// 注册 Rust→Java 数据到达回调（Java 侧初始化时调用一次；重复调用幂等）。
+/// 保存 NativeBridge 类 GlobalRef 与 `onDataAvailable(J)V` 静态方法 id。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_registerNotifyCallback(
+    mut env: EnvUnowned,
+    class: JClass,
+) {
+    let _ = resolve_default(
+        env.with_env(|env| {
+            let method =
+                env.get_static_method_id(&class, jni_str!("onDataAvailable"), jni_sig!("(J)V"))?;
+            let class_ref = env.new_global_ref(class)?;
+            let _ = NOTIFY.set(NotifyTarget {
+                class: class_ref,
+                method,
+            });
+            Ok::<_, Error>(())
+        }),
+        "registerNotifyCallback",
+        || (),
+    );
 }
 
 #[unsafe(no_mangle)]

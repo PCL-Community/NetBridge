@@ -1,6 +1,7 @@
 package top.tangge233.netbridge.jni;
 
 import java.nio.ByteBuffer;
+import top.tangge233.netbridge.channel.NativeChannel;
 
 /**
  * JNI 桥到 net-bridge-native（Rust）。
@@ -13,7 +14,7 @@ import java.nio.ByteBuffer;
  */
 public final class NativeBridge {
     /** Java 侧期望的 native ABI 版本；加载后经 {@link NativeLoader} 校验，不匹配即拒绝。 */
-    public static final String EXPECTED_ABI_VERSION = "0.2.0";
+    public static final String EXPECTED_ABI_VERSION = "0.3.0";
 
     /** 传输类别标签：QUIC（quinn-plaintext 明文握手）。 */
     public static final int KIND_QUIC = 0;
@@ -24,6 +25,23 @@ public final class NativeBridge {
 
     /** 返回 Rust 侧 ABI 版本字符串。 */
     public static native String version();
+
+    /**
+     * 注册 Rust→Java 数据到达回调（native 侧保存调用目标）。幂等；
+     * 未注册时数据到达仅靠 Java 侧轮询兜底。
+     */
+    public static native void registerNotifyCallback();
+
+    /**
+     * Rust 数据到达通知（tokio 线程回调，仅作唤醒信号，不带数据）。
+     * 实际读取由 channel 在自身 EventLoop 上执行，避免跨线程触碰 pipeline。
+     */
+    public static void onDataAvailable(long connId) {
+        NativeChannel channel = NativeChannel.channelFor(connId);
+        if (channel != null) {
+            channel.wakeupRead();
+        }
+    }
 
     // ---- 服务端 ----
 
