@@ -212,7 +212,7 @@ public class NativeChannel extends AbstractChannel {
         while (written < maxMessages && in.current() != null) {
             int r = writeMessage(in, in.current());
             if (r != 1) {
-                break; // 保留待重试（0）或连接级失败（-1）。
+                break; // 保留待重试（0）或通道已关闭（-1）。
             }
             written++;
         }
@@ -222,7 +222,8 @@ public class NativeChannel extends AbstractChannel {
     /**
      * 写出单条 outbound 消息（所有权仍归 outbound buffer，按结果移除）。
      *
-     * @return 1 = 已完整写走（消息已移除）；0 = 队列满/未就绪，保留重试；-1 = 连接级失败，通道已关闭
+     * @return 1 = 已完整写走（消息已移除）；0 = 队列满/未就绪，保留重试；
+     *         -1 = 连接已不存在，通道已关闭（收尾竞态，静默移除不失败写）
      */
     private int writeMessage(ChannelOutboundBuffer in, Object msg) {
         if (!(msg instanceof ByteBuf buf)) {
@@ -249,10 +250,10 @@ public class NativeChannel extends AbstractChannel {
         buf.getBytes(buf.readerIndex(), data, 0, readable);
         int accepted = NativeBridge.writeChunk(connId, data, readable);
         if (accepted < 0) {
-            // 连接已在 native 侧移除/关闭（收尾竞态，非传输错误）：以
-            // ClosedChannelException 静默收尾，避免 MC "Exception caught
-            // in connection" 刷 ERROR 并误判为异常断开。
-            in.remove(new ClosedChannelException());
+            // 连接已在 native 侧移除/关闭（收尾竞态）：静默移除消息并关闭。
+            // 不得失败 write future——否则 close future 带 cause，MC 会刷
+            // "Exception caught in connection" ERROR；连接已死，写不出去无损失。
+            in.remove();
             unsafe().close(voidPromise());
             return -1;
         }
