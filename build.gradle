@@ -18,6 +18,8 @@ def nativeProfile = (findProperty('nativeProfile') ?: 'debug').toString()
 if (!(nativeProfile in ['debug', 'release'])) {
     throw new GradleException("nativeProfile must be debug or release, got: ${nativeProfile}")
 }
+// 配置期捕获：任务执行期访问 project 在 Gradle 10 非法（配置缓存不兼容）。
+def skipNativeBuild = providers.gradleProperty('skipNativeBuild').isPresent()
 def cargoDir = file('rust/net-bridge-native')
 def cdylibDir = file("$buildDir/native")
 
@@ -32,12 +34,14 @@ def nativeOsDir = osName.contains('win') ? 'windows'
         : (osName.contains('mac') || osName.contains('darwin')) ? 'macos' : 'linux'
 def nativeArchDir = (archName in ['x86_64', 'amd64']) ? 'x86_64' : (archName in ['aarch64', 'arm64']) ? 'aarch64' : archName
 def nativeSubdir = "${nativeOsDir}-${nativeArchDir}"
+// 配置期捕获：cargo 产物路径（执行期不得再访问 project.file）。
+def srcCdylib = file("rust/net-bridge-native/target/${nativeProfile}/${cdylibName}")
 // 供子项目（:common 测试 java.library.path）引用。
 ext.nativeSubdir = nativeSubdir
 
 tasks.register('buildCdylib') {
     // CI 预置三平台库到 build/native 后可用 -PskipNativeBuild 跳过本机 cargo 构建。
-    onlyIf { !project.hasProperty('skipNativeBuild') }
+    onlyIf { !skipNativeBuild }
     doLast {
         cdylibDir.mkdirs()
         def cargoArgs = ['cargo', 'build']
@@ -52,15 +56,14 @@ tasks.register('buildCdylib') {
         if (code != 0) {
             throw new GradleException("cargo build failed with exit code " + code)
         }
-        def src = file("rust/net-bridge-native/target/${nativeProfile}/${cdylibName}")
-        if (!src.exists()) {
-            throw new GradleException("Rust cdylib not found after cargo build: ${src}")
+        if (!srcCdylib.exists()) {
+            throw new GradleException("Rust cdylib not found after cargo build: ${srcCdylib}")
         }
         def dstDir = new File(cdylibDir, nativeSubdir)
         dstDir.mkdirs()
-        def dst = new File(dstDir, src.name)
-        Files.copy(src.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        println "copied native (${nativeProfile}): ${src} -> ${dst}"
+        def dst = new File(dstDir, srcCdylib.name)
+        Files.copy(srcCdylib.toPath(), dst.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        println "copied native (${nativeProfile}): ${srcCdylib} -> ${dst}"
     }
 }
 
@@ -78,14 +81,15 @@ def syncedCopies = [
     ['mixin/StatusResponseWriteMixin.java', 'mixin/StatusResponseWriteMixin.java'],
 ]
 
+// 配置期捕获：副本校验基目录（执行期不得再访问 project.file）。
+def fabricBase = file('fabric/src/main/java/top/tangge233/netbridge/fabric')
+def neoforgeBase = file('neoforge/src/main/java/top/tangge233/netbridge/neoforge')
+
 tasks.register('checkSyncedCopies') {
     group = 'verification'
     description = 'Verifies fabric/neoforge source copies stay in sync.'
     doLast {
-        def base = [
-            fabric  : file('fabric/src/main/java/top/tangge233/netbridge/fabric'),
-            neoforge: file('neoforge/src/main/java/top/tangge233/netbridge/neoforge'),
-        ]
+        def base = [fabric: fabricBase, neoforge: neoforgeBase]
         def normalize = { f -> f.readLines().findAll {
             def t = it.trim()
             t && !(t.startsWith('package ') || t.startsWith('import '))
@@ -110,23 +114,25 @@ tasks.register('checkSyncedCopies') {
 
 // --- 产物聚合：双平台 jar 收集到根 build/libs/ ---
 def rootLibs = layout.buildDirectory.dir('libs')
+// 配置期捕获：neoforge 产物 Provider（执行期访问 project 在 Gradle 10 非法）。
+def neoforgeJar = project(':neoforge').layout.buildDirectory.file("libs/net-bridge-neoforge-${modVersion}.jar")
 
-tasks.register('assembleAll') {
+tasks.register('assembleAll', Copy) {
     group = 'build'
     description = 'Assemble both platform mod jars into root build/libs/.'
     dependsOn tasks.named('buildCdylib')
     dependsOn tasks.named('checkSyncedCopies')
     dependsOn ':neoforge:jarNeoForge'
     dependsOn ':fabric:remapJar'
-    doLast {
-        copy {
-            from project(':neoforge').layout.buildDirectory.file("libs/net-bridge-neoforge-${modVersion}.jar")
-            into rootLibs
-        }
-        copy {
-            from project(':fabric').tasks.named('remapJar').flatMap { it.archiveFile }
+    from(neoforgeJar)
+    into(rootLibs)
+}
+
+// fabric remapJar 在其项目求值后才注册：延迟到 projectsEvaluated 挂接来源。
+gradle.projectsEvaluated {
+    tasks.named('assembleAll').configure { t ->
+        t.from(project(':fabric').tasks.named('remapJar').flatMap { it.archiveFile }) {
             rename { "net-bridge-fabric-${modVersion}.jar" }
-            into rootLibs
         }
     }
 }
