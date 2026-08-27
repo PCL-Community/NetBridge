@@ -8,6 +8,7 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.EventLoop;
+import java.util.concurrent.RejectedExecutionException;
 import io.netty.util.concurrent.FastThreadLocal;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -235,7 +236,12 @@ public class NativeChannel extends AbstractChannel {
             pendingWake.set(false);
             return;
         }
-        loop.execute(this::drainRead);
+        try {
+            loop.execute(this::drainRead);
+        } catch (RejectedExecutionException e) {
+            // EventLoop 已关闭：复位唤醒令牌，交由轮询兜底（连接即将收尾）。
+            pendingWake.set(false);
+        }
     }
 
     /**
@@ -262,7 +268,12 @@ public class NativeChannel extends AbstractChannel {
         }
         if (any || pendingWake.get()) {
             // 数据未完或新通知又至：让出 EventLoop 后继续，避免霸占。
-            eventLoop().execute(this::drainRead);
+            try {
+                eventLoop().execute(this::drainRead);
+            } catch (RejectedExecutionException e) {
+                // EventLoop 已关闭：复位令牌，轮询兜底。
+                pendingWake.set(false);
+            }
         }
     }
 
