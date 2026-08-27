@@ -18,6 +18,7 @@ use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
 use jni::sys::{jboolean, jbyte, jbyteArray, jint, jlong, jlongArray, jstring};
 use jni::{Env, EnvOutcome, EnvUnowned, Outcome};
 
+use bridge::error::BridgeError;
 use transport::TransportKind;
 
 pub const NET_BRIDGE_ABI_VERSION: &str = "0.2.0";
@@ -93,6 +94,16 @@ fn optional_string(env: &mut EnvUnowned, value: &JString, context: &str) -> Opti
         context,
         || None,
     )
+}
+
+/// 连接不存在/已关闭属正常收尾（-1 已表达语义），不刷 stderr；其余错误照常上报。
+fn report_conn_err(err: &BridgeError) {
+    if !matches!(
+        err,
+        BridgeError::NoSuchConnection | BridgeError::ConnectionClosed
+    ) {
+        bridge::report_error(err.message());
+    }
 }
 
 /// 把数组前 `len` 字节拷入新 Vec：写方向的边界拷贝，只拷有效区
@@ -266,13 +277,12 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_connect(
     match bridge::connect(kind, &host, port, kcp_profile) {
         Ok(id) => id as jlong,
         Err(err) => {
-            bridge::report_error(err.message());
+            report_conn_err(&err);
             -1
         }
     }
 }
 
-/// 查询连接状态；不存在时 native 层已返回 -1（Java 映射 UNKNOWN）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_connectionState(
     _env: EnvUnowned,
@@ -331,7 +341,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_writeChunk(
     match bridge::write_chunk(conn as u64, bytes.into()) {
         Ok(n) => n as jint,
         Err(err) => {
-            bridge::report_error(err.message());
+            report_conn_err(&err);
             -1
         }
     }
@@ -346,7 +356,6 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_readChunk(
 ) -> jbyteArray {
     let max = max_bytes.max(0) as usize;
     let Ok(bytes) = bridge::read_chunk(conn as u64, max) else {
-        // read_chunk 内部已上报错误。
         return std::ptr::null_mut();
     };
     resolve_default(

@@ -249,7 +249,10 @@ public class NativeChannel extends AbstractChannel {
         buf.getBytes(buf.readerIndex(), data, 0, readable);
         int accepted = NativeBridge.writeChunk(connId, data, readable);
         if (accepted < 0) {
-            in.remove(new IOException("native write failed (conn " + connId + ", see net-bridge-native log)"));
+            // 连接已在 native 侧移除/关闭（收尾竞态，非传输错误）：以
+            // ClosedChannelException 静默收尾，避免 MC "Exception caught
+            // in connection" 刷 ERROR 并误判为异常断开。
+            in.remove(new ClosedChannelException());
             unsafe().close(voidPromise());
             return -1;
         }
@@ -382,8 +385,8 @@ public class NativeChannel extends AbstractChannel {
             try {
                 int n = readInto(buf);
                 if (n < 0) {
-                    pipeline().fireExceptionCaught(new IOException(
-                            "read failed (conn " + connId + ", see net-bridge-native log)"));
+                    // 连接已在 native 侧移除（收尾竞态）：静默关闭，不 fire 异常。
+                    unsafe().close(voidPromise());
                     break;
                 }
                 if (n == 0) {

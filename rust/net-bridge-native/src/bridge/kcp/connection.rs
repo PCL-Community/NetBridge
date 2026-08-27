@@ -142,6 +142,7 @@ async fn reader_loop(
                 }
             }
             Err(_) if state.load(Ordering::SeqCst) == STATE_CLOSED => break true,
+            Err(e) if is_session_closed(&e) => break true, // 会话关闭：干净收尾。
             Err(e) => {
                 report_error(format!("kcp conn {conn_id}: read error: {e}"));
                 break false;
@@ -177,9 +178,13 @@ async fn drive(
                 let closed = match cmd {
                     Some(Command::Write(bytes)) if !bytes.is_empty() => {
                         if let Err(e) = stream_w.write_all(&bytes).await {
-                            report_error(format!("kcp conn {conn_id}: write error: {e}"));
-                            state.store(STATE_FAILED, Ordering::SeqCst);
-                            true
+                            if is_session_closed(&e) {
+                                true // 会话已关：对端收尾，非传输错误。
+                            } else {
+                                report_error(format!("kcp conn {conn_id}: write error: {e}"));
+                                state.store(STATE_FAILED, Ordering::SeqCst);
+                                true
+                            }
                         } else {
                             false
                         }
@@ -204,4 +209,11 @@ async fn drive(
 async fn graceful_close(stream_w: &mut (impl AsyncWrite + Unpin), session: &Session) {
     let _ = stream_w.shutdown().await;
     let _ = session.close().await;
+}
+
+/// smux 会话结束统一表现为 BrokenPipe "Session is closed"（对端关闭、
+/// keep-alive 超时或底层传输终止均如此）：连接到此为止，按干净收尾处理，
+/// 不按传输错误上报 FAILED——Java 侧据此静默关闭而非刷 ERROR 日志。
+fn is_session_closed(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::BrokenPipe
 }
