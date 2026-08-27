@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
 use kcp::{KcpConfig, KcpNoDelayConfig};
 
 /// 传输预设：平衡（默认）与激进。
@@ -31,25 +30,28 @@ impl KcpProfile {
     }
 
     fn no_delay(self) -> KcpNoDelayConfig {
+        let mut cfg = KcpNoDelayConfig {
+            nodelay: true,
+            interval: 10,
+            nc: true,
+            ..KcpNoDelayConfig::default()
+        };
         match self {
-            Self::Balanced => KcpNoDelayConfig::normal(),
-            Self::Aggressive => KcpNoDelayConfig::fastest(),
-        }
+            Self::Balanced => cfg.resend = 2,
+            Self::Aggressive => cfg.resend = 1,
+        };
+        cfg
     }
 }
 
 /// 构建两端共用的 KCP 配置。参数为两端锁定的预设值，不支持自定义。
 pub fn build_config(profile: KcpProfile) -> KcpConfig {
     KcpConfig {
-        mtu: 1300,
+        mtu: 1400,
         nodelay: profile.no_delay(),
         snd_wnd: 256,
         rcv_wnd: 256,
-        stream: true,
-        session_key: Bytes::new(),
-        session_id_len: 16,
-        session_expire: Duration::from_secs(90),
-        // 黑洞建连：8s 内无应答 native 侧直接 FAILED，不必等 Java watchdog(10s)。
+        stream: false,
         connect_timeout: Duration::from_secs(8),
         ..KcpConfig::default()
     }
@@ -73,7 +75,7 @@ mod tests {
     fn presets_match_adr() {
         let balanced = build_config(KcpProfile::Balanced);
         assert_eq!(balanced.mtu, 1300);
-        assert!(balanced.stream, "stream 模式必须开启");
+        assert!(!balanced.stream, "Stream should disabled");
         assert_eq!((balanced.snd_wnd, balanced.rcv_wnd), (256, 256));
         assert_eq!(balanced.session_expire, Duration::from_secs(90));
         assert!(!balanced.nodelay.nodelay);
