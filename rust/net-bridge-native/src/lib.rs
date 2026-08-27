@@ -42,6 +42,10 @@ struct NotifyTarget {
 
 /// 数据到达通知（tokio 线程调用）：回调 Java `onDataAvailable(connId)`。
 /// 未注册回调（单测/旧流程）或 attach 失败时静默跳过——Java 轮询兜底。
+///
+/// 用 scoped attach（回调结束自动 detach）：永久 attach 会让 JVM 退出时
+/// DestroyJavaVM 永久等待 tokio worker 线程，进程挂死。scoped 的重复
+/// attach 成本随通知频率（每 ~64KB 块一次）可忽略。
 pub(crate) fn notify_data(conn_id: u64) {
     let Some(target) = NOTIFY.get() else {
         return;
@@ -49,7 +53,7 @@ pub(crate) fn notify_data(conn_id: u64) {
     let Ok(vm) = JavaVM::singleton() else {
         return;
     };
-    let _ = vm.attach_current_thread(|env| {
+    let _ = vm.attach_current_thread_for_scope(|env| {
         let arg = JValue::Long(conn_id as i64).as_jni();
         // SAFETY: method id 来自 get_static_method_id，class 由 GlobalRef 持有；
         // args 指向本调用栈上的 jvalue。
