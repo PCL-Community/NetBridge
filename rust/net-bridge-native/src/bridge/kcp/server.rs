@@ -16,7 +16,7 @@ use super::config::{KcpProfile, build_config};
 use super::connection::run_kcp_connection;
 use super::fec_stream::FecStream;
 use crate::bridge::error::{BridgeError, Transport};
-use crate::bridge::registry::{allocate_id, runtime, servers};
+use crate::bridge::registry::{allocate_id, remove_conn, runtime, servers};
 use crate::bridge::server_ops::{register_connection, stop_server};
 use crate::bridge::{ServerHandle, TransportEndpoint, try_admit};
 
@@ -40,17 +40,24 @@ pub fn start_server(
     let (tx, rx) = std::sync::mpsc::channel::<Result<u16, BridgeError>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
     rt.spawn(async move {
-        server_task(
-            server_id,
-            port,
-            bind,
-            max_connections,
-            config,
-            tx,
-            stop_tx,
-            stop_rx,
-        )
+        let panicked = crate::bridge::guarded("kcp accept task", async move {
+            server_task(
+                server_id,
+                port,
+                bind,
+                max_connections,
+                config,
+                tx,
+                stop_tx,
+                stop_rx,
+            )
+            .await;
+        })
         .await;
+        if panicked {
+            // acceptor 死亡：注销服务端句柄，避免 SERVERS 残留。
+            servers().remove(&server_id);
+        }
     });
 
     match rx.recv_timeout(Duration::from_secs(5)) {
@@ -161,14 +168,24 @@ async fn accept_loop(
             continue; // 超限：drop 握手成功的流，会话由 session_expire 回收。
         }
         let reg = register_connection(server_id, peer, Arc::clone(&conn_count));
-        tokio::spawn(run_kcp_connection(
-            reg.conn_id,
-            FecStream::new(stream),
-            reg.to_transport_rx,
-            reg.to_java_tx,
-            reg.state,
-            false,
-        ));
+        let conn_id = reg.conn_id;
+        tokio::spawn(async move {
+            let panicked = crate::bridge::guarded("kcp connection task", async move {
+                run_kcp_connection(
+                    conn_id,
+                    FecStream::new(stream),
+                    reg.to_transport_rx,
+                    reg.to_java_tx,
+                    reg.state,
+                    false,
+                )
+                .await;
+            })
+            .await;
+            if panicked {
+                remove_conn(conn_id);
+            }
+        });
     }
 }
 

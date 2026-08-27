@@ -20,11 +20,12 @@ use crate::bridge::{Command, STATE_CLOSED, STATE_FAILED, report_error};
 type KcpFec = FecStream<KcpStream>;
 
 /// smux 配置：帧上限与 Java 侧块上限对齐，其余取默认值。
-fn smux_config() -> Config {
+/// build 对静态参数理论恒成功，但按 fail-open 约定不 panic，失败转错误。
+fn smux_config() -> Result<Config, String> {
     ConfigBuilder::new()
         .max_frame_size(64 * 1024)
         .build()
-        .expect("static smux config")
+        .map_err(|e| format!("smux config build failed: {e}"))
 }
 
 /// KCP 会话主循环：建会话 → 建流 → 读写驱动 → 收尾。
@@ -45,13 +46,25 @@ pub async fn run_kcp_connection(
 
     let (stream_r, stream_w) = tokio::io::split(stream);
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
-    let reader = tokio::spawn(reader_loop(
-        conn_id,
-        stream_r,
-        to_java_tx,
-        state.clone(),
-        reader_done_tx,
-    ));
+    let done_guard = reader_done_tx.clone();
+    let reader_state = state.clone();
+    let reader = tokio::spawn(async move {
+        let panicked = crate::bridge::guarded("kcp reader task", async move {
+            reader_loop(
+                conn_id,
+                stream_r,
+                to_java_tx,
+                reader_state,
+                reader_done_tx,
+            )
+            .await;
+        })
+        .await;
+        if panicked {
+            // 读侧死：补发收尾信号，让主循环正常退出清理，避免连接挂起。
+            let _ = done_guard.try_send(true);
+        }
+    });
 
     drive(
         conn_id,
@@ -75,10 +88,16 @@ async fn create_session(
     client_side: bool,
     state: &AtomicU32,
 ) -> Option<Session> {
+    let config = match smux_config() {
+        Ok(config) => config,
+        Err(msg) => {
+            return request_fail(conn_id, state, Err(msg));
+        }
+    };
     let result = if client_side {
-        Session::client(fec, smux_config()).await
+        Session::client(fec, config).await
     } else {
-        Session::server(fec, smux_config()).await
+        Session::server(fec, config).await
     };
     request_fail(
         conn_id,

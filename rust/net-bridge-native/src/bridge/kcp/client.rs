@@ -28,16 +28,22 @@ pub fn connect(host: &str, port: u16, profile: KcpProfile) -> Result<u64, Bridge
     let (conn_id, state, to_java_tx, to_transport_rx) = register_client();
     let host = host.to_string();
     rt.spawn(async move {
-        connect_task(
-            conn_id,
-            state,
-            host,
-            port,
-            profile,
-            to_transport_rx,
-            to_java_tx,
-        )
+        let panicked = crate::bridge::guarded("kcp connect task", async move {
+            connect_task(
+                conn_id,
+                state,
+                host,
+                port,
+                profile,
+                to_transport_rx,
+                to_java_tx,
+            )
+            .await;
+        })
         .await;
+        if panicked {
+            remove_conn(conn_id);
+        }
     });
     Ok(conn_id)
 }

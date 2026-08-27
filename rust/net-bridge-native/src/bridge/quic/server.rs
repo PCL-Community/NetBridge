@@ -82,23 +82,30 @@ pub fn start_server(
     );
 
     rt.spawn(async move {
-        loop {
-            let incoming = match accept_endpoint.accept().await {
-                Some(incoming) => incoming,
-                // endpoint 被 stopServer 关闭。
-                None => break,
-            };
-            if accept_counter.load(Ordering::Relaxed) >= max_connections {
-                drop(incoming);
-                continue;
+        let panicked = crate::bridge::guarded("quic accept loop", async move {
+            loop {
+                let incoming = match accept_endpoint.accept().await {
+                    Some(incoming) => incoming,
+                    // endpoint 被 stopServer 关闭。
+                    None => break,
+                };
+                if accept_counter.load(Ordering::Relaxed) >= max_connections {
+                    drop(incoming);
+                    continue;
+                }
+                let conn_counter = Arc::clone(&accept_counter);
+                rt.spawn(serve_incoming(
+                    server_id,
+                    incoming,
+                    conn_counter,
+                    max_connections,
+                ));
             }
-            let conn_counter = Arc::clone(&accept_counter);
-            rt.spawn(serve_incoming(
-                server_id,
-                incoming,
-                conn_counter,
-                max_connections,
-            ));
+        })
+        .await;
+        if panicked {
+            // acceptor 死亡：注销服务端句柄，避免 SERVERS 残留。
+            servers().remove(&server_id);
         }
     });
     Ok(server_id)
@@ -122,17 +129,24 @@ async fn serve_incoming(
     let reg = register_connection(server_id, peer, conn_counter);
     match conn.accept_bi().await {
         Ok((send, recv)) => {
-            run_connection(
-                reg.conn_id,
-                conn,
-                send,
-                recv,
-                reg.to_transport_rx,
-                reg.to_java_tx,
-                reg.to_transport_tx,
-                reg.state,
-            )
+            let conn_id = reg.conn_id;
+            let panicked = crate::bridge::guarded("quic connection task", async move {
+                run_connection(
+                    conn_id,
+                    conn,
+                    send,
+                    recv,
+                    reg.to_transport_rx,
+                    reg.to_java_tx,
+                    reg.to_transport_tx,
+                    reg.state,
+                )
+                .await;
+            })
             .await;
+            if panicked {
+                remove_conn(conn_id);
+            }
         }
         Err(_) => {
             reg.state.store(STATE_FAILED, Ordering::SeqCst);

@@ -26,21 +26,27 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
     let (conn_id, state, to_java_tx, mut to_transport_rx, to_transport_tx) = register_client();
     let host = host.to_string();
     rt.spawn(async move {
-        if let Some((conn, send, recv)) =
-            establish(&host, port, conn_id, &state, &mut to_transport_rx).await
-        {
-            state.store(STATE_CONNECTED, Ordering::SeqCst);
-            run_connection(
-                conn_id,
-                conn,
-                send,
-                recv,
-                to_transport_rx,
-                to_java_tx,
-                to_transport_tx,
-                state,
-            )
-            .await;
+        let panicked = crate::bridge::guarded("quic connect task", async move {
+            if let Some((conn, send, recv)) =
+                establish(&host, port, conn_id, &state, &mut to_transport_rx).await
+            {
+                state.store(STATE_CONNECTED, Ordering::SeqCst);
+                run_connection(
+                    conn_id,
+                    conn,
+                    send,
+                    recv,
+                    to_transport_rx,
+                    to_java_tx,
+                    to_transport_tx,
+                    state,
+                )
+                .await;
+            }
+        })
+        .await;
+        if panicked {
+            remove_conn(conn_id);
         }
     });
     Ok(conn_id)

@@ -36,29 +36,33 @@ pub async fn run_connection(
     let reader = {
         let to_transport_tx = to_transport_tx.clone();
         tokio::spawn(async move {
-            // 防护：quinn 不应产出空块；连续异常则终止读循环交由收尾。
-            let mut empty_streak = 0u32;
-            loop {
-                match recv.read_chunk(65536, true).await {
-                    Ok(Some(chunk)) => {
-                        if chunk.bytes.is_empty() {
-                            empty_streak = empty_streak.saturating_add(1);
-                            if empty_streak >= 16 {
+            let panicked = crate::bridge::guarded("quic reader task", async move {
+                // 防护：quinn 不应产出空块；连续异常则终止读循环交由收尾。
+                let mut empty_streak = 0u32;
+                loop {
+                    match recv.read_chunk(65536, true).await {
+                        Ok(Some(chunk)) => {
+                            if chunk.bytes.is_empty() {
+                                empty_streak = empty_streak.saturating_add(1);
+                                if empty_streak >= 16 {
+                                    break;
+                                }
+                                continue;
+                            }
+                            empty_streak = 0;
+                            if to_java_tx.send(chunk.bytes).await.is_err() {
                                 break;
                             }
-                            continue;
+                            // 数据已入 Java 队列：反向通知唤醒 EventLoop 立即读，免轮询等待。
+                            crate::notify_data(conn_id);
                         }
-                        empty_streak = 0;
-                        if to_java_tx.send(chunk.bytes).await.is_err() {
-                            break;
-                        }
-                        // 数据已入 Java 队列：反向通知唤醒 EventLoop 立即读，免轮询等待。
-                        crate::notify_data(conn_id);
+                        Ok(None) => break,
+                        Err(_) => break,
                     }
-                    Ok(None) => break,
-                    Err(_) => break,
                 }
-            }
+            })
+            .await;
+            let _ = panicked; // 已日志；panic 也不阻塞收尾信号。
             drop(to_transport_tx);
             let _ = reader_done_tx.send(()).await;
         })

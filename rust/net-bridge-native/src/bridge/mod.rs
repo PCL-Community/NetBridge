@@ -22,8 +22,11 @@ pub use dataplane::{close_connection, connection_state, read_chunk, write_chunk}
 pub use registry::{conn_remote_addr, report_error};
 pub use server_ops::{accept_connections, server_port, stop_server};
 
+use std::any::Any;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -147,4 +150,31 @@ pub(crate) fn try_admit(count: &AtomicUsize, max: usize) -> bool {
         return false;
     }
     true
+}
+
+/// 任务 panic 防护：catch_unwind 包裹 future，panic 记 stderr 日志并返回 true。
+/// 调用方在返回 true 时执行连接/服务端句柄清理——panic 任务不能留下注册表残留。
+pub(crate) async fn guarded<F: Future<Output = ()>>(what: &str, fut: F) -> bool {
+    let result = catch_unwind(AssertUnwindSafe(move || fut));
+    match result {
+        Ok(f) => {
+            f.await;
+            false
+        }
+        Err(payload) => {
+            report_error(format!("{what} panicked: {}", describe_panic(&payload)));
+            true
+        }
+    }
+}
+
+/// 提取 panic payload 的可读信息；非字符串 payload 记占位。
+fn describe_panic(payload: &Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
