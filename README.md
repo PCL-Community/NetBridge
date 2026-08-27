@@ -54,6 +54,9 @@ max_connection = 256 # excess connections are silently dropped
 [kcp]
 enable = true
 port = -1            # follows Minecraft TCP port + 1
+bind = ""            # empty = follow server.properties server-ip
+host = ""            # advertised address; empty = follow the server address
+max_connection = 256
 profile = "balance"  # or "aggressive"
 ```
 
@@ -75,7 +78,7 @@ Requirements:
 | Dependency | Notes |
 | ---------- | ----- |
 | Rust | via [rustup](https://rustup.rs/) |
-| JDK & Gradle | managed by [mise](https://mise.jdx.dev/), see `mise.toml` |
+| JDK 21+ | Gradle runs through the `./gradlew` wrapper (JDK from PATH) |
 
 Build in release mode:
 
@@ -94,6 +97,17 @@ Clean everything:
 ```bash
 make clean
 ```
+
+The Rust crate is built as a cdylib and bundled into the mod jar under
+`native/<os>-<arch>/`; the CI release workflow builds all supported
+platforms. Skip the local cargo build with `-PskipNativeBuild` when
+platform libraries are already staged in `build/native/`.
+
+## Documentation
+
+Architecture decisions and conventions live in `docs/` (Chinese):
+`docs/adr/` (JNI boundary, data-plane threading, handshake timeouts, …),
+`docs/conventions.md`, `docs/glossary.md`.
 
 ## License
 
