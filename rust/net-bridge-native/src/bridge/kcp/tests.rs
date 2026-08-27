@@ -55,8 +55,8 @@ fn kcp_loopback_roundtrip() {
     let client =
         connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced).expect("kcp connect");
 
-    // KCP 无握手应答：CONNECTED 延迟到首个入站帧；客户端连接期即可写，
-    // 首包触发服务端会话创建——必须先写再等 accept。
+    // kcp-rs 内建握手：服务端 SYN 确认后 accept 返回；连接期即可写
+    // （early_write），无需先写再等 accept。
     let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
     assert_eq!(
         write_chunk(client, Bytes::from(payload.clone())).expect("client write"),
@@ -96,7 +96,7 @@ fn kcp_loopback_roundtrip() {
     stop_server(server);
 }
 
-/// 对端关闭传播（控制字路径）：服务端 close → 客户端经 FRAME_CLOSE 感知。
+/// 对端关闭传播（smux 路径）：服务端 close → FIN → 客户端读侧 EOF 感知。
 #[test]
 fn kcp_peer_close_propagates_to_client() {
     let server = start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
@@ -105,7 +105,7 @@ fn kcp_peer_close_propagates_to_client() {
     let client =
         connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced).expect("kcp connect");
 
-    // 先写：触发服务端会话创建（无握手模型）。
+    // 先写：确保会话建立后立即有活动流量（握手由 kcp-rs 完成）。
     assert_eq!(
         write_chunk(client, Bytes::copy_from_slice(b"warm-up")).expect("warm-up write"),
         7

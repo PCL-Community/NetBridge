@@ -17,10 +17,10 @@ ADR 序列自重构起重新编号（docs/adr/0001 起）；旧代码注释中 A
 ## 传输协议
 
 - **QUIC 明文（quic-plaintext）**：QUIC 传输但关闭 TLS 加密；安全性由 Minecraft 自带加密流保证。动机：省一次加密握手开销。
-- **KCP 栈**（自外向内）：**FEC(RS) → KCP → ExtendedCmd**。
+- **KCP 栈**（自外向内）：**FEC(RS) → KCP → smux**。
   - **FEC / RS 码**：Reed-Solomon 前向纠错，最外层 UDP 包保护。实现在 `bridge/kcp/fec_stream.rs`。
-  - **KCP**：可靠低延迟 ARQ，stream 模式（字节流管道），tokio_kcp 实现。
-  - **ExtendedCmd**：KCP 缺失关闭语义的补丁层，即 `bridge/kcp/frame.rs` 应用帧：`[type:1][len:u16 BE][payload]`，type=0 数据帧、type=1 控制帧(close)。帧边界即 flush，不满 FEC 尾块零填充立即发出。
+  - **KCP**：可靠低延迟 ARQ，stream 模式（字节流管道），kcp-rs 实现（内建 SYN 握手）。
+  - **smux**：多路流控层（原 `bridge/kcp/frame.rs` 控制字层已移除），滑动窗口 token 流控 + FIN 关闭语义；单条 MC 字节流占用一个 smux 流。
 - **KCP profile**：预设参数档，仅二档不支持自定义。配置串规范 `balance` / `aggressive`
   （Rust 解析兼容别名 `balanced`）：
   - **balance**：nodelay=0/interval=40/resend=0/nc=0，mtu=1300，wnd=(256,256)，stream=true。
@@ -42,8 +42,8 @@ ADR 序列自重构起重新编号（docs/adr/0001 起）；旧代码注释中 A
 - **降级记忆**：按服务器地址记忆 fallback 结果，TTL 5 分钟；**命中即直接走 TCP、跳过全部
   加速尝试**，过期后重新执行完整尝试序列（ADR-0002）。
 - **握手存活判定**：Java `HandshakeWatchdog` 竞速 connect promise（10s/20s）——quinn 黑洞下永不
-  自行失败、KCP 无握手概念，watchdog 为唯一可行方案（ADR-0008）。QUIC 的 CONNECTED = 明文握手
-  完成；**KCP 的 CONNECTED = 首个入站字节到达**（重定义，防黑洞误判保住降级窗口）。
+  自行失败（ADR-0008）。QUIC 的 CONNECTED = 明文握手完成；**KCP 的 CONNECTED = kcp-rs SYN
+  握手完成**（`connect_timeout` 8s 内无应答直接 FAILED，watchdog 兜底）。
 - **连接提示**：ConnectScreen 另起一行显示实际状态机文案——"正在建立 QUIC/KCP/TCP 连接"、
   降级时"正在回退 TCP 连接"（ADR-0005）。服务器列表 tooltip 说明降级策略。
 - **F3 协议行**：单行 `[net-bridge] <QUIC|KCP|TCP> <addr>`，显示实际生效协议与连接地址（ADR-0005）。

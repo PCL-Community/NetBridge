@@ -2,7 +2,7 @@
 //!
 //! 架构：
 //! - [`bridge`] 模块持有连接注册表与批量字节队列，按 [`transport::TransportKind`]
-//!   分派 QUIC（quinn-plaintext）与 KCP（tokio-kcp + FEC）实现；
+//!   分派 QUIC（quinn-plaintext）与 KCP（kcp-rs + FEC + smux）实现；
 //! - JNI 导出把这些原语暴露给 Java（`top.tangge233.netbridge.jni.NativeBridge`），
 //!   每条连接 = 一个双向字节流，承载整个 MC 会话。
 //!

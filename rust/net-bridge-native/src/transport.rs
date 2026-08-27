@@ -10,7 +10,7 @@ use crate::bridge::error::Transport;
 pub enum TransportKind {
     /// quinn-plaintext 明文 QUIC。
     Quic,
-    /// tokio-kcp + FEC 帧化 KCP。
+    /// kcp-rs + FEC + smux 多路流控 KCP。
     Kcp,
 }
 

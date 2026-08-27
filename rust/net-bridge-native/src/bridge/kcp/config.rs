@@ -1,12 +1,17 @@
 //! KCP 参数预设：balanced / aggressive 二档，不支持自定义。
 //!
-//! 公共固定：`mtu=1300`、`wnd_size=(256,256)`、`stream=true`（字节流管道
-//! 语义）`flush_write=true`（写后立即冲刷，MC 小包低延迟）、
-//! `session_expire=90s`（对端消失的服务端侧回收）。
+//! 公共固定：`mtu=1300`、`wnd=(256,256)`、`stream=true`（字节流管道语义）、
+//! `session_expire=90s`（对端消失的服务端侧回收）、`connect_timeout=8s`
+//! （黑洞握手尽早失败，先于 Java 侧 10s watchdog 给出结果）、
+//! `session_id_len=16`（SYN 握手随机会话 id）。
+//!
+//! 握手模型（kcp-rs）：客户端 `connect` 发 SYN 等确认，服务端按 session id
+//! 建会话——`KcpStream::connect` 返回即双向可达，无需自定义探测帧。
 
 use std::time::Duration;
 
-use tokio_kcp::{KcpConfig, KcpNoDelayConfig};
+use bytes::Bytes;
+use kcp::{KcpConfig, KcpNoDelayConfig};
 
 /// 传输预设：平衡（默认）与激进。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -42,12 +47,15 @@ pub fn build_config(profile: KcpProfile) -> KcpConfig {
     KcpConfig {
         mtu: 1300,
         nodelay: profile.no_delay(),
-        wnd_size: (256, 256),
-        session_expire: Duration::from_secs(90),
-        flush_write: true,
-        flush_acks_input: false,
+        snd_wnd: 256,
+        rcv_wnd: 256,
         stream: true,
-        allow_recv_empty_packet: false,
+        session_key: Bytes::new(),
+        session_id_len: 16,
+        session_expire: Duration::from_secs(90),
+        // 黑洞建连：8s 内无应答 native 侧直接 FAILED，不必等 Java watchdog(10s)。
+        connect_timeout: Duration::from_secs(8),
+        ..KcpConfig::default()
     }
 }
 
@@ -70,8 +78,8 @@ mod tests {
         let balanced = build_config(KcpProfile::Balanced);
         assert_eq!(balanced.mtu, 1300);
         assert!(balanced.stream, "stream 模式必须开启");
-        assert!(balanced.flush_write);
-        assert_eq!(balanced.wnd_size, (256, 256));
+        assert_eq!((balanced.snd_wnd, balanced.rcv_wnd), (256, 256));
+        assert_eq!(balanced.session_expire, Duration::from_secs(90));
         assert!(!balanced.nodelay.nodelay);
 
         let aggressive = build_config(KcpProfile::Aggressive);

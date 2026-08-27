@@ -30,7 +30,7 @@ src/
 ├── transport.rs      trait Transport { connect/accept/state/read/write/close }
 ├── bridge/mod.rs     句柄注册表（传输无关 id）、server/client 门面
 ├── bridge/quic/      quinn-plaintext 实现
-└── bridge/kcp/       fec_stream + tokio_kcp + frame（现结构保留）
+└── bridge/kcp/       fec_stream + kcp-rs + smux（现结构保留）
 ```
 
 JNI 导出层只做参数转换，业务在 `bridge` 门面后；两协议经 `dyn Transport` 分派。

@@ -55,8 +55,8 @@ pub struct ConnHandle {
     pub server_id: Option<u64>,
     /// 服务端连接的每实例活跃计数（客户端连接为 None）；remove 时递减。
     pub server_count: Option<Arc<AtomicUsize>>,
-    /// 连接期即可写入：KCP 客户端无握手应答，出站不等待首帧入站
-    /// （否则与服务端"按首包建会话"互等死锁）。QUIC 客户端为 false。
+    /// 连接期即可写入：KCP 客户端握手未完成时允许写入（命令先入 channel，
+    /// 握手完成后立即下发；kcp-rs 内建握手，不依赖首帧判定）。QUIC 客户端为 false。
     pub early_write: bool,
     /// 服务端连接是否已被 Java 通过 acceptConnections 取走。
     pub reported: AtomicBool,

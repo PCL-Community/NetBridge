@@ -8,6 +8,10 @@
 //! - 双栈绑定失败回退 IPv4-only（保留原 try-v6-fallback-v4 行为语义，两个
 //!   失败原因合并进错误信息供上层日志）。
 //!
+//! UDP 校验和：无跨平台强制开启 API（SO_NO_CHECK 仅为 Linux 细化项，默认
+//! 已开启），依赖 OS 默认——IPv6 强制、IPv4 默认开；FEC 层继续兜底校验和未
+//! 覆盖的异常损坏。
+//!
 //! 返回 std [`UdpSocket`]：QUIC 经 `Endpoint::new` 接管，KCP 经
 //! `KcpListener::from_socket` / `KcpStream::connect_with_socket` 接管。
 

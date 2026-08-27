@@ -1,35 +1,47 @@
-//! KCP 单连接数据面：控制字帧读写循环与关闭传播。
+//! KCP 单连接数据面：smux 会话内的 MC 字节流读写循环与关闭传播。
 //!
-//! 结构镜像 QUIC 的 `run_connection`（bridge/connection.rs）：经
+//! 结构与 QUIC 的 `run_connection`（bridge/quic/connection.rs）同构：经
 //! [`tokio::io::split`] 拆出读写两半——读任务推 Java 队列，主循环消费
-//! Java 命令并 select 读任务句柄感知对端关闭。关闭语义：本端 Close 发送
-//! FRAME_CLOSE 控制帧后收尾；对端读侧据此优雅置 CLOSED（替代死等超时）。
+//! Java 命令并 select 读任务句柄感知对端关闭。
+//!
+//! 流控与关闭语义（原 frame.rs 控制字层已移除）：
+//! - 流控：smux 会话内置滑动窗口 token 池（`max_receive_buffer`），Java
+//!   侧慢消费时 token 不归还、读任务阻塞，背压经 KCP 天然回传；
+//! - 关闭：本端 Close → FIN 关流 + 会话关闭；对端 FIN → 读侧干净 EOF
+//!   （CLOSED）；对端会话死亡 → 读侧 BrokenPipe（FAILED，与 QUIC 一致）。
 
-use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use bytes::Bytes;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use bytes::{Bytes, BytesMut};
+use smux::{Config, ConfigBuilder, Session};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use super::fec_stream::FecStream;
-use super::frame;
 use crate::bridge::registry::remove_conn;
 use crate::bridge::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED};
 
-type KcpFec = FecStream<tokio_kcp::KcpStream>;
+type KcpFec = FecStream<kcp::KcpStream>;
 
-/// KCP 会话主循环：`fec` 为已建立的纠错流。
+/// smux 会话配置：帧上限 64KiB（与 Java 侧块上限一致），其余取默认
+/// （流量窗口 4MB、keep-alive 10s/30s）。
+fn smux_config() -> Config {
+    ConfigBuilder::new()
+        .max_frame_size(64 * 1024)
+        .build()
+        .expect("static smux config")
+}
+
+/// KCP 会话主循环：`fec` 为已建立的纠错流（承载 smux 会话）。
 ///
-/// 建连（无握手模型）：`client_side=true` 首发 FRAME_PROBE 探测帧，服务端
-/// （false）接纳后立即回发 FRAME_PONG——客户端以此置位 CONNECTED，打破
-/// 「服务端按首包建会话 / 客户端等首帧才回」互等死锁。
+/// 建连（kcp-rs 握手模型）：`connect`/`accept` 已完成 SYN 交换，此函数不再
+/// 发送探测帧；CONNECTED 由调用方在握手完成后置位。
 ///
 /// 关闭传播：
-/// - 本端 `Command::Close` → FRAME_CLOSE + shutdown → CLOSED；
-/// - 对端 FRAME_CLOSE / 防御性 EOF → 读任务退出 → 主循环 channel 关闭收尾；
-/// - IO 错误（解码超限/截断等）→ FAILED。
+/// - 本端 `Command::Close` → FIN + 会话关闭 → CLOSED；
+/// - 对端 FIN → 读侧 EOF → 主循环收尾 → CLOSED；
+/// - 对端会话死亡 / 传输错误 → 读侧错误 → FAILED（优先级保留）。
 pub async fn run_kcp_connection(
     conn_id: u64,
     fec: KcpFec,
@@ -38,105 +50,92 @@ pub async fn run_kcp_connection(
     state: Arc<AtomicU32>,
     client_side: bool,
 ) {
-    let (mut fec_r, mut fec_w) = tokio::io::split(fec);
-    // 建连破环帧：写失败不致命（KCP 重传保证最终送达）；对端无存活则由
-    // 看门狗兜底，此帧仅加速双向可达判定。
-    let first = if client_side {
-        frame::FRAME_PROBE
+    // 建立 smux 会话：每条 KCP 连接携带单条 MC 字节流。
+    let session = match if client_side {
+        Session::client(fec, smux_config()).await
     } else {
-        frame::FRAME_PONG
-    };
-    let _ = frame::write_frame(&mut fec_w, first, b"").await;
-
-    // 读任务退出信号：JoinHandle 不能在完成后再次 poll（会 panic），
-    // 故以 channel 通知主循环，句柄仅用于超时兜底 abort。
-    let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<()>(1);
-    let reader_state = Arc::clone(&state);
-    let reader = tokio::spawn(async move {
-        let reader_state = reader_state;
-        let mut payload = Vec::with_capacity(4096);
-        loop {
-            let readed = frame::read_frame(&mut fec_r, &mut payload).await;
-            match readed {
-                Ok((frame::FRAME_DATA, len)) => {
-                    if len == 0 {
-                        continue; // 空数据帧合法但无意义
-                    }
-                    // 首个有效数据帧送达 Java 队列即视为连接存活
-                    // （客户端 CONNECTED 判定；服务端注册时已为 CONNECTED）。
-                    let _ = reader_state.compare_exchange(
-                        STATE_CONNECTING,
-                        STATE_CONNECTED,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                    // Vec → Bytes 零拷贝接管后换新缓冲，避免每帧堆分配。
-                    let chunk: Bytes = std::mem::take(&mut payload).into();
-                    payload = Vec::with_capacity(4096.max(chunk.len()));
-                    if to_java_tx.send(chunk).await.is_err() {
-                        break;
-                    }
-                }
-                Ok((frame::FRAME_CLOSE, _)) => break,
-                Ok((frame::FRAME_PROBE, _)) => {
-                    continue; // 探测帧无数据语义：服务端侧忽略。
-                }
-                Ok((frame::FRAME_PONG, _)) => {
-                    // 存活应答：客户端以此置位 CONNECTED（服务端侧防御性忽略）。
-                    let _ = reader_state.compare_exchange(
-                        STATE_CONNECTING,
-                        STATE_CONNECTED,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                    continue;
-                }
-                Ok((other, _)) => {
-                    // 未知类型：协议不匹配，连接不可信。
-                    let _ = other;
-                    reader_state.store(STATE_FAILED, Ordering::SeqCst);
-                    break;
-                }
-                Err(_) => {
-                    // 解码超限/截断：数据不可信。FAILED 由收尾规则保留，
-                    // 不被 CLOSED 覆盖（与 QUIC 一致，Java poll 依赖区分）。
-                    reader_state.store(STATE_FAILED, Ordering::SeqCst);
-                    break;
-                }
-            }
+        Session::server(fec, smux_config()).await
+    } {
+        Ok(s) => s,
+        Err(_) => {
+            state.store(STATE_FAILED, Ordering::SeqCst);
+            remove_conn(conn_id);
+            return;
         }
-        let _ = reader_done_tx.send(()).await;
+    };
+    // 客户端主动开流、服务端被动接受；流同步由 smux SYN 帧完成。
+    let stream = match if client_side {
+        session.open_stream().await
+    } else {
+        session.accept_stream().await
+    } {
+        Ok(s) => s,
+        Err(_) => {
+            state.store(STATE_FAILED, Ordering::SeqCst);
+            remove_conn(conn_id);
+            return;
+        }
+    };
+
+    let (mut stream_r, mut stream_w) = tokio::io::split(stream);
+    // 读任务退出信号：先发 true=对端 FIN（干净 EOF），false=错误（FAILED）。
+    // JoinHandle 不能在完成后再次 poll（会 panic），故以 channel 通知主循环，
+    // 句柄仅用于超时兜底 abort。读任务不写状态原子——FAILED/CLOSED 归属主循环。
+    let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
+    let reader = tokio::spawn(async move {
+        let mut payload = BytesMut::with_capacity(64 * 1024);
+        let clean = loop {
+            payload.clear();
+            match stream_r.read_buf(&mut payload).await {
+                Ok(0) => break true, // 对端 FIN：流关闭，无错误。
+                Ok(_) => {
+                    // BytesMut → Bytes 零拷贝接管；被 Java 消费后不再持有缓冲。
+                    if to_java_tx.send(payload.split().freeze()).await.is_err() {
+                        break true;
+                    }
+                }
+                Err(_) => break false, // 对端会话死亡/传输错误：FAILED。
+            }
+        };
+        let _ = reader_done_tx.send(clean).await;
     });
 
     loop {
         // Close 命令可能因队列满丢失，或状态已由外部置 CLOSED；兜底收尾。
         if state.load(Ordering::SeqCst) == STATE_CLOSED {
-            graceful_close(&mut fec_w).await;
+            graceful_close(&mut stream_w, &session).await;
             break;
         }
         tokio::select! {
             biased;
 
-            _ = reader_done_rx.recv() => {
-                // 读侧先行终止：对端关闭（CLOSE 帧/防御性 EOF）或不可信
-                // 错误。FAILED 已由读任务写入；此处推进本地收尾。
-                graceful_close(&mut fec_w).await;
+            clean = reader_done_rx.recv() => {
+                // 对端 FIN（clean=true）：正常收尾，状态最终置 CLOSED；
+                // 对端会话死亡/传输错误（clean=false）：FAILED 由收尾规则
+                // 保留，不被 CLOSED 覆盖（与 QUIC 一致，Java poll 依赖区分）。
+                if clean == Some(false) {
+                    state.store(STATE_FAILED, Ordering::SeqCst);
+                }
+                graceful_close(&mut stream_w, &session).await;
                 break;
             }
             cmd = to_kcp_rx.recv() => match cmd {
                 Some(Command::Write(bytes)) => {
-                    if write_data_frame(&mut fec_w, &bytes).await.is_err() {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    if stream_w.write_all(&bytes).await.is_err() {
                         state.store(STATE_FAILED, Ordering::SeqCst);
                         break;
                     }
                 }
                 Some(Command::Close) => {
-                    graceful_close(&mut fec_w).await;
+                    graceful_close(&mut stream_w, &session).await;
                     break;
                 }
                 None => {
                     // 全部发送端关闭（外部句柄释放）→ 收尾。
-                    graceful_close(&mut fec_w).await;
+                    graceful_close(&mut stream_w, &session).await;
                     break;
                 }
             },
@@ -154,18 +153,9 @@ pub async fn run_kcp_connection(
     remove_conn(conn_id);
 }
 
-/// 尽力而为的优雅关闭：发 CLOSE 帧并 shutdown 底层流；
-/// 对端能否收到不影响本地状态机推进。
-async fn graceful_close(fec_w: &mut (impl AsyncWrite + Unpin)) {
-    let _ = frame::write_frame(fec_w, frame::FRAME_CLOSE, b"").await;
-    let _ = AsyncWriteExt::shutdown(fec_w).await;
-}
-
-/// 写一帧数据；>u16 的块切分（防御路径；JNI 层块 ≤64KiB）。
-/// 空块跳过——空数据帧无接收方语义。
-async fn write_data_frame(fec_w: &mut (impl AsyncWrite + Unpin), data: &Bytes) -> io::Result<()> {
-    for chunk in data.chunks(u16::MAX as usize) {
-        frame::write_frame(fec_w, frame::FRAME_DATA, chunk).await?;
-    }
-    Ok(())
+/// 尽力而为的优雅关闭：FIN 关流 + 无条件关闭会话；对端能否收到不影响
+/// 本地状态机推进。
+async fn graceful_close(stream_w: &mut (impl AsyncWrite + Unpin), session: &Session) {
+    let _ = stream_w.shutdown().await;
+    let _ = session.close().await;
 }

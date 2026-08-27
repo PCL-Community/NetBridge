@@ -1,16 +1,16 @@
-//! KCP 服务端：acceptor 生命周期与连接接纳（无握手模型）。
+//! KCP 服务端：acceptor 生命周期与连接接纳（kcp-rs 内建握手）。
 //!
-//! 接纳语义（tokio_kcp listener）：未知 `(peer_addr, conv)` 组合即新连接
-//! 候选——`max_connection` 软限超限直接丢弃 KcpStream（会话随 session_expire
-//! 回收）。与 QUIC 的 accept 阶段拒绝语义对齐：快路径预检 + 计数原子
-//! 兜底，竞态窗口内的超发即弃。
+//! 接纳语义（kcp-rs `KcpUdpStream` listener）：SYN 包携带的随机会话 id
+//! 触发新会话创建——`accept` 在握手完成后才返回 `(KcpStream, peer)`，
+//! 与 QUIC 的 accept 阶段拒绝语义对齐：快路径预检 + 计数原子兜底，
+//! 竞态窗口内的超发即弃。
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio_kcp::KcpListener;
+use kcp::KcpUdpStream;
 
 use super::config::{build_config, KcpProfile};
 use super::connection::run_kcp_connection;
@@ -23,7 +23,7 @@ use crate::bridge::{try_admit, ServerHandle, TransportEndpoint};
 /// 启动 KCP 服务端（端口 0 系统分配）。
 ///
 /// socket 经 [`crate::bridge::socket_util`] 统一底座创建（双栈/缓冲/
-/// REUSEADDR）。`from_socket` 内部无网络往返（仅建 channel + 起任务），
+/// REUSEADDR）。`socket_listen` 内部无网络往返（仅建 channel + 起任务），
 /// 以带超时的同步等待完成注册后再返回句柄——保证 Java 拿到 id 时
 /// `server_port` 已可查、Ping 可宣告真实端口。
 pub fn start_server(
@@ -51,15 +51,14 @@ pub fn start_server(
             let udp = tokio::net::UdpSocket::from_std(socket).map_err(|source| {
                 BridgeError::Setup { transport: Transport::Kcp, stage: "from_std", source }
             })?;
-            let listener =
-                KcpListener::from_socket(config, udp).await.map_err(|e| {
-                    BridgeError::Other(format!("kcp listener: {e}"))
-                })?;
-            let local = listener.local_addr().map_err(|source| BridgeError::Setup {
+            let local = udp.local_addr().map_err(|source| BridgeError::Setup {
                 transport: Transport::Kcp,
                 stage: "local addr",
                 source,
             })?;
+            let listener =
+                KcpUdpStream::socket_listen(Arc::new(config), udp, max_connections.max(8), None)
+                    .map_err(|e| BridgeError::Other(format!("kcp listener: {e}")))?;
             Ok::<_, BridgeError>((listener, local))
         }
         .await;
@@ -83,8 +82,8 @@ pub fn start_server(
         );
         let _ = tx.send(Ok(local.port()));
 
-        // Accept 循环：stop_server 发停止信号后 Drop listener（任务收尾、
-        // socket 关闭）。
+        // Accept 循环：stop_server 发停止信号后 Drop listener
+        // （token 取消、任务收尾、socket 关闭，既有会话随之回收）。
         loop {
             let accepted = tokio::select! {
                 _ = stop_rx.recv() => break,
@@ -94,7 +93,7 @@ pub fn start_server(
                 },
             };
             let (stream, peer) = accepted;
-            // 软限快路径：超限直接丢弃（会话由 session_expire 回收）。
+            // 软限快路径：超限直接丢弃（握手会话由 session_expire 回收）。
             if conn_count.load(Ordering::Relaxed) >= max_connections {
                 drop(stream);
                 continue;

@@ -17,7 +17,7 @@ public final class NativeBridge {
 
     /** 传输类别标签：QUIC（quinn-plaintext 明文握手）。 */
     public static final int KIND_QUIC = 0;
-    /** 传输类别标签：KCP（tokio-kcp + FEC 帧化）。 */
+    /** 传输类别标签：KCP（kcp-rs + FEC + smux 流控）。 */
     public static final int KIND_KCP = 1;
 
     private NativeBridge() {}

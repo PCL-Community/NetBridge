@@ -1,27 +1,27 @@
-//! KCP 客户端：异步建连，立即返回连接 id（与 QUIC 客户端同构）。
+//! KCP 客户端：异步建连（kcp-rs 内建握手），立即返回连接 id（与 QUIC 客户端同构）。
 //!
 //! 流程镜像 bridge/quic/client.rs：JNI 调用线程只注册占位句柄；DNS 解析、
-//! socket 绑定与 KCP 建立全部在 runtime 任务内——任何同步阻塞都会冻结
+//! socket 绑定与 KCP 握手全部在 runtime 任务内——任何同步阻塞都会冻结
 //! 同一 Netty EventLoop。失败路径置 FAILED、上报并就地自清理。
 //!
-//! conv 语义：`connect_with_socket` 本地生成随机非零 conv，服务端按首包
-//! 接纳（无握手模型）。CONNECTED 延迟到首个入站数据帧（存活判定）；
-//! 出站不受门控——否则与服务端"按首包建会话"互等死锁。
+//! 握手模型（kcp-rs）：`connect` 发 SYN（含随机会话 id），服务端按会话 id
+//! 接纳并回确认；`KcpUdpStream::socket_connect` 返回时 CONNECTED 置位——
+//! 双向可达已有证明，不再需要 FRAME_PROBE/FRAME_PONG 探测路径。
+//! 出站不受门控：Java 在握手期写入命令先入 channel，握手完成后立即下发。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
+use kcp::KcpUdpStream;
 use tokio::sync::mpsc;
-
-use tokio_kcp::KcpStream;
 
 use super::config::{build_config, KcpProfile};
 use super::connection::run_kcp_connection;
 use super::fec_stream::FecStream;
 use crate::bridge::error::{BridgeError, Transport};
 use crate::bridge::registry::{allocate_id, conns, remove_conn, report_error, runtime};
-use crate::bridge::{ConnHandle, STATE_CONNECTING};
+use crate::bridge::{ConnHandle, STATE_CONNECTED, STATE_CONNECTING};
 
 /// 发起 KCP 连接（异步建立，立即返回连接 id）。
 pub fn connect(host: &str, port: u16, profile: KcpProfile) -> Result<u64, BridgeError> {
@@ -98,25 +98,25 @@ pub fn connect(host: &str, port: u16, profile: KcpProfile) -> Result<u64, Bridge
                 return;
             }
         };
-        let stream =
-            match KcpStream::connect_with_socket(&build_config(profile), udp, addr).await {
-                Ok(s) => s,
-                Err(e) => {
-                    fail(
-                        conn_id,
-                        &state,
-                        BridgeError::Connect {
-                            transport: Transport::Kcp,
-                            addr,
-                            source: Box::new(e),
-                        },
-                    );
-                    return;
-                }
-            };
-        // connect_with_socket 纯本地构建：CONNECTED 在读循环收到服务端
-        // FRAME_PONG（会话建立应答）时置位——run_kcp_connection 首发的
-        // FRAME_PROBE 触发服务端会话创建（无握手模型，免首次写入互等）。
+        let config = Arc::new(build_config(profile));
+        // SYN 握手：服务端确认后才返回（connect_timeout=8s，黑洞尽早 FAILED）。
+        let stream = match KcpUdpStream::socket_connect(config, addr, udp).await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                fail(
+                    conn_id,
+                    &state,
+                    BridgeError::Connect {
+                        transport: Transport::Kcp,
+                        addr,
+                        source: Box::new(e),
+                    },
+                );
+                return;
+            }
+        };
+        // 握手完成即双向可达：CONNECTED，先于首个数据帧（相对旧探测帧模型）。
+        state.store(STATE_CONNECTED, Ordering::SeqCst);
         run_kcp_connection(
             conn_id,
             FecStream::new(stream),
