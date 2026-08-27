@@ -42,6 +42,6 @@ public abstract class ConnectScreenMixin extends Screen {
         } else {
             text = Component.translatable("netbridge.connect.falling_back");
         }
-        graphics.drawCenteredString(this.font, text, this.width / 2, this.height / 2 + 12, 0xFFFFFF);
+        graphics.drawCenteredString(this.font, text, this.width / 2, this.height / 2 - 65, 0xFFFFFF);
     }
 }
