@@ -93,36 +93,50 @@ pub fn start_server(
                 continue;
             }
             let conn_counter = Arc::clone(&accept_counter);
-            rt.spawn(async move {
-                // 取对端地址（Java 侧 IP 管控依赖）。
-                let peer = incoming.remote_address();
-                if let Ok(conn) = incoming.await {
-                    if !try_admit(&conn_counter, max_connections) {
-                        return;
-                    }
-                    let reg = register_connection(server_id, peer, conn_counter);
-                    match conn.accept_bi().await {
-                        Ok((send, recv)) => {
-                            run_connection(
-                                reg.conn_id,
-                                conn,
-                                send,
-                                recv,
-                                reg.to_transport_rx,
-                                reg.to_java_tx,
-                                reg.to_transport_tx,
-                                reg.state,
-                            )
-                            .await;
-                        }
-                        Err(_) => {
-                            reg.state.store(STATE_FAILED, Ordering::SeqCst);
-                            remove_conn(reg.conn_id);
-                        }
-                    }
-                }
-            });
+            rt.spawn(serve_incoming(
+                server_id,
+                incoming,
+                conn_counter,
+                max_connections,
+            ));
         }
     });
     Ok(server_id)
+}
+
+/// 服务一条 incoming：握手 → 登记 → 双向流 → 数据循环；任何失败就地清理。
+async fn serve_incoming(
+    server_id: u64,
+    incoming: quinn::Incoming,
+    conn_counter: Arc<AtomicUsize>,
+    max_connections: usize,
+) {
+    // 取对端地址（Java 侧 IP 管控依赖）。
+    let peer = incoming.remote_address();
+    let Ok(conn) = incoming.await else {
+        return;
+    };
+    if !try_admit(&conn_counter, max_connections) {
+        return;
+    }
+    let reg = register_connection(server_id, peer, conn_counter);
+    match conn.accept_bi().await {
+        Ok((send, recv)) => {
+            run_connection(
+                reg.conn_id,
+                conn,
+                send,
+                recv,
+                reg.to_transport_rx,
+                reg.to_java_tx,
+                reg.to_transport_tx,
+                reg.state,
+            )
+            .await;
+        }
+        Err(_) => {
+            reg.state.store(STATE_FAILED, Ordering::SeqCst);
+            remove_conn(reg.conn_id);
+        }
+    }
 }

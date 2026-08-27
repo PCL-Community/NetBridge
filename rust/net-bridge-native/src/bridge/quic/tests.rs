@@ -43,7 +43,7 @@ fn wait_disconnected(conn: u64) {
 /// 断言连接已进入终态（CLOSED 或已移除的 UNKNOWN），否则报异常状态。
 fn wait_terminal(conn: u64) {
     match connection_state(conn) {
-        Some(STATE_CLOSED) | None => return,
+        Some(STATE_CLOSED) | None => {}
         other => panic!("unexpected terminal state {other:?}"),
     }
 }

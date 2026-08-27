@@ -16,7 +16,7 @@ pub mod transport;
 use jni::errors::Error;
 use jni::objects::{JByteArray, JByteBuffer, JClass, JString};
 use jni::sys::{jboolean, jbyte, jbyteArray, jint, jlong, jlongArray, jstring};
-use jni::{EnvOutcome, EnvUnowned, Outcome};
+use jni::{Env, EnvOutcome, EnvUnowned, Outcome};
 
 use transport::TransportKind;
 
@@ -93,6 +93,32 @@ fn optional_string(env: &mut EnvUnowned, value: &JString, context: &str) -> Opti
         context,
         || None,
     )
+}
+
+/// 把数组前 `len` 字节拷入新 Vec：写方向的边界拷贝，只拷有效区
+/// （Java 侧复用暂存区时避免整块冗余拷出）。
+fn copy_region(env: &mut Env, data: &JByteArray, len: usize) -> Result<Vec<u8>, Error> {
+    let mut buf = vec![0u8; len];
+    if len > 0 {
+        // SAFETY: jbyte 与 u8 同尺寸同布局，仅按位重解释用于 JNI 拷出。
+        let region: &mut [jbyte] =
+            unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len) };
+        data.get_region(env, 0, region)?;
+    }
+    Ok(buf)
+}
+
+/// 取直接缓冲区的可写区（从对象基址绝对偏移 0 起）；容量为 0 时返回空
+/// 切片——JNI 允许空直接缓冲返回空指针，from_raw_parts_mut(null, 0) 属 UB。
+fn direct_slice<'e>(env: &mut Env, buffer: &JByteBuffer) -> Result<&'e mut [u8], Error> {
+    let addr = env.get_direct_buffer_address(buffer)?;
+    let cap = env.get_direct_buffer_capacity(buffer)?;
+    if cap == 0 {
+        return Ok(&mut []);
+    }
+    // SAFETY: addr 指向 JVM 直接缓冲区内存且 cap 为其可写字节数；
+    // JNI 约定该指针仅在本次原生调用内使用。
+    Ok(unsafe { std::slice::from_raw_parts_mut(addr.cast(), cap) })
 }
 
 #[unsafe(no_mangle)]
@@ -231,6 +257,11 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_connect(
         bridge::report_error(format!("invalid remote port {port}"));
         return -1;
     };
+    if port == 0 {
+        // 「系统分配」仅服务端有意义；客户端 connect 端口 0 直接拒绝。
+        bridge::report_error("invalid remote port 0".to_string());
+        return -1;
+    }
     let kcp_profile = resolve_profile(optional_string(&mut env, &profile, "connect"));
     match bridge::connect(kind, &host, port, kcp_profile) {
         Ok(id) => id as jlong,
@@ -289,17 +320,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_writeChunk(
     let len = length as usize;
     // None = 数组读取失败（区别于空数组：空数据合法返回 0）。
     let bytes = resolve_default(
-        env.with_env(|env| {
-            // 只取 data[0..len)：Java 侧复用暂存区时避免整块冗余拷出。
-            let mut buf = vec![0u8; len];
-            if len > 0 {
-                // SAFETY: jbyte 与 u8 同尺寸同布局，仅按位重解释用于 JNI 拷出。
-                let region: &mut [jbyte] =
-                    unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len) };
-                data.get_region(env, 0, region)?;
-            }
-            Ok::<_, Error>(Some(buf))
-        }),
+        env.with_env(|env| copy_region(env, &data, len).map(Some)),
         "writeChunk",
         || None,
     );
@@ -357,13 +378,7 @@ pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_readChunkIn
     }
     // 非直接缓冲 / 已释放 / null 均为调用方 bug：-1 而非截断。
     let Some(dst) = resolve_default(
-        env.with_env(|env| {
-            let addr = env.get_direct_buffer_address(&buffer)?;
-            let cap = env.get_direct_buffer_capacity(&buffer)?;
-            // SAFETY: addr 指向 JVM 直接缓冲区内存且 cap 为其可写字节数；
-            // JNI 约定该指针仅在本次原生调用内使用。
-            Ok::<_, Error>(Some(unsafe { std::slice::from_raw_parts_mut(addr, cap) }))
-        }),
+        env.with_env(|env| direct_slice(env, &buffer).map(Some)),
         "readChunkInto",
         || None,
     ) else {

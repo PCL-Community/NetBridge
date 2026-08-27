@@ -16,7 +16,11 @@ public class NetBridgeFabricMod implements ModInitializer {
 
     @Override
     public void onInitialize() {
-        NativeLoader.load();
+        if (!NativeLoader.load()) {
+            NetBridge.LOGGER.error(
+                    "net-bridge native unavailable; accelerated transports disabled (TCP fallback)");
+            return;
+        }
         ClientConfig.useConfigFile(
                 FabricLoader.getInstance().getConfigDir().resolve("net-bridge/client.toml"));
         NetBridge.LOGGER.info(

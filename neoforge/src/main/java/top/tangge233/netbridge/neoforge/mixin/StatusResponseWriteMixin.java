@@ -2,6 +2,7 @@ package top.tangge233.netbridge.neoforge.mixin;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
+import java.nio.charset.StandardCharsets;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.protocol.status.ClientboundStatusResponsePacket;
 import net.minecraft.network.protocol.status.ServerStatus;
@@ -49,7 +50,8 @@ public abstract class StatusResponseWriteMixin {
         if (json != null) {
             String injected = StatusNetworksCodec.addNetworks(json, StatusNetworksCodec.buildNetworks(
                     NativeAcceptor.announcement().entries()));
-            if (injected.length() <= MAX_STATUS_JSON) {
+            // writeUtf 上限按 UTF-8 字节计，length() 为字符数（CJK/emoji 会低估）。
+            if (injected.getBytes(StandardCharsets.UTF_8).length <= MAX_STATUS_JSON) {
                 buf.writeUtf(injected, MAX_STATUS_JSON);
                 return;
             }

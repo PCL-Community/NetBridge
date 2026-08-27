@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import top.tangge233.netbridge.NetBridge;
 
 /**
  * 从打包 jar 中解出原生库并加载（按 {@code native/<os>-<arch>/} 选择
@@ -83,19 +84,33 @@ public final class NativeLoader {
      * 内置版本不可被外部替换。
      *
      * <p>加载成功后校验 ABI 版本（{@link NativeBridge#EXPECTED_ABI_VERSION}）：
-     * 不匹配即抛出并给出明确日志——Java 与 native 的方法签名/语义可能已分叉，
-     * 带错运行会产生难以定位的崩溃。
+     * 不匹配即记录日志。库不可用或 ABI 不匹配返回 false（调用方降级纯 TCP，
+     * 不得让客户端初始化/服务器启动崩溃）。
+     *
+     * @return 加载成功且 ABI 匹配返回 true；幂等，已成功加载亦返回 true
      */
-    public static synchronized void load() {
+    public static synchronized boolean load() {
         if (loaded) {
-            return;
+            return true;
         }
         try {
             loadFromClasspath();
         } catch (RuntimeException | UnsatisfiedLinkError e) {
-            loadSystem();
+            try {
+                loadSystem();
+            } catch (Throwable t) {
+                NetBridge.LOGGER.error(
+                        "net-bridge native library unavailable: {}", t.toString());
+                return false;
+            }
         }
-        verifyAbi();
+        try {
+            verifyAbi();
+        } catch (RuntimeException e) {
+            NetBridge.LOGGER.error("net-bridge native ABI check failed: {}", e.getMessage());
+            return false;
+        }
+        return true;
     }
 
     /** 校验 native ABI 版本；不匹配即抛出并记录双方版本号。 */

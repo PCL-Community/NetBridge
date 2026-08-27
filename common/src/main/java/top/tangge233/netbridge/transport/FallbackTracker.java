@@ -50,6 +50,15 @@ public final class FallbackTracker {
         EXPIRIES.put(key(address), now + TTL_MILLIS);
         if (EXPIRIES.size() > 256) {
             evictExpired(now);
+            // 过期清理后仍超限：全为有效期内的条目，强制淘汰最近过期的。
+            while (EXPIRIES.size() > 256) {
+                Map.Entry<String, Long> oldest =
+                        EXPIRIES.entrySet().stream().min(Map.Entry.comparingByValue()).orElse(null);
+                if (oldest == null) {
+                    break;
+                }
+                EXPIRIES.remove(oldest.getKey());
+            }
         }
     }
 

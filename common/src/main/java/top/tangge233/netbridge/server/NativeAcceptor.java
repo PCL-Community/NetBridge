@@ -67,7 +67,11 @@ public final class NativeAcceptor {
         if (quicHandle != -1 || kcpHandle != -1) {
             return true;
         }
-        NativeLoader.load();
+        if (!NativeLoader.load()) {
+            NetBridge.LOGGER.warn(
+                    "net-bridge native unavailable; accelerated transports disabled, only TCP will be served");
+            return false;
+        }
         ServerConfig config = ServerConfig.load();
         Map<String, NetworksEntry> entries = new LinkedHashMap<>();
 
@@ -211,28 +215,37 @@ public final class NativeAcceptor {
         return announcement;
     }
 
+    /** 以当前句柄为起始值派生后台 accept 线程（daemon，随 JVM 退出）。 */
+    private static void startAcceptLoop() {
+        long qh = quicHandle;
+        long kh = kcpHandle;
+        Thread thread = new Thread(() -> acceptLoop(qh, kh), "net-bridge-accept");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     /**
      * 后台轮询两个实例的 acceptConnections，把新连接交给 mod 层处理器。
      *
      * <p>以「对应 handle 仍等于启动值」为存活条件：stop() 置空后线程自行
      * 退出，重启靠 handle 不匹配互斥，无需显式取消。
      */
-    private static void startAcceptLoop() {
-        long qh = quicHandle;
-        long kh = kcpHandle;
-        Thread thread = new Thread(() -> {
+    private static void acceptLoop(long qh, long kh) {
+        while ((qh != -1 && quicHandle == qh) || (kh != -1 && kcpHandle == kh)) {
             try {
-                while ((qh != -1 && quicHandle == qh) || (kh != -1 && kcpHandle == kh)) {
-                    drain(qh, quicHandle);
-                    drain(kh, kcpHandle);
-                    Thread.sleep(5);
-                }
+                drain(qh, quicHandle);
+                drain(kh, kcpHandle);
+            } catch (Throwable t) {
+                // 防御兜底：单轮异常不得杀死 accept 线程（新连接会在 native 侧排队）。
+                NetBridge.LOGGER.warn("Accept drain failed", t);
+            }
+            try {
+                Thread.sleep(5);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+                return;
             }
-        }, "net-bridge-accept");
-        thread.setDaemon(true);
-        thread.start();
+        }
     }
 
     /** 取出单个实例的新连接并派发；handle 已被替换则跳过。 */
@@ -240,22 +253,31 @@ public final class NativeAcceptor {
         if (expectedHandle < 0 || currentHandle != expectedHandle) {
             return;
         }
-        long[] ids = NativeBridge.acceptConnections(expectedHandle);
-        LongConsumer handler = connectionHandler;
-        for (long id : ids) {
-            if (handler != null) {
-                ADOPT_EXECUTOR.execute(() -> {
-                    try {
-                        handler.accept(id);
-                    } catch (Throwable t) {
-                        NetBridge.LOGGER.warn("Connection handler failed for conn {}", id, t);
-                        NativeBridge.closeConnection(id);
-                    }
-                });
-            } else {
-                NetBridge.LOGGER.warn("Connection {} rejected: no connection handler registered", id);
-                NativeBridge.closeConnection(id);
+        try {
+            long[] ids = NativeBridge.acceptConnections(expectedHandle);
+            // JNI 出错时按 ABI 契约返回 null：接受循环必须存活，下轮重试。
+            if (ids == null) {
+                return;
             }
+            LongConsumer handler = connectionHandler;
+            for (long id : ids) {
+                if (handler != null) {
+                    ADOPT_EXECUTOR.execute(() -> {
+                        try {
+                            handler.accept(id);
+                        } catch (Throwable t) {
+                            NetBridge.LOGGER.warn("Connection handler failed for conn {}", id, t);
+                            NativeBridge.closeConnection(id);
+                        }
+                    });
+                } else {
+                    NetBridge.LOGGER.warn("Connection {} rejected: no connection handler registered", id);
+                    NativeBridge.closeConnection(id);
+                }
+            }
+        } catch (Throwable t) {
+            // 单次 drain 失败不杀死 accept 线程：新连接在 native 侧排队，下轮继续。
+            NetBridge.LOGGER.warn("Accept drain failed for server {}", expectedHandle, t);
         }
     }
 

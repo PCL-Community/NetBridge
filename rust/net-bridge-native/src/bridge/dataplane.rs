@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::error::BridgeError;
 use crate::bridge::registry::{conns, remove_conn};
-use crate::bridge::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_FAILED};
+use crate::bridge::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED};
 
 /// 查询连接状态；不存在返回 None（Java 映射为 UNKNOWN）。
 pub fn connection_state(conn: u64) -> Option<u32> {
@@ -34,8 +34,9 @@ pub fn close_connection(conn: u64) -> bool {
     drop(handle);
     let was = state.swap(STATE_CLOSED, Ordering::SeqCst);
     let ok = to_transport.try_send(Command::Close).is_ok();
-    // 防御性幂等清理：正常路径已由任务收尾/失败回调自清理。
-    if was == STATE_FAILED {
+    // 防御性幂等清理：正常路径已由任务收尾/失败回调自清理；
+    // 握手中的连接（CONNECTING）在 QUIC 黑洞下任务无法自行收尾，在此直接注销。
+    if was == STATE_FAILED || was == STATE_CONNECTING {
         remove_conn(conn);
     }
     ok

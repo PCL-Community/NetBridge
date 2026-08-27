@@ -17,7 +17,7 @@ use super::connection::run_kcp_connection;
 use super::fec_stream::FecStream;
 use crate::bridge::error::{BridgeError, Transport};
 use crate::bridge::registry::{allocate_id, runtime, servers};
-use crate::bridge::server_ops::register_connection;
+use crate::bridge::server_ops::{register_connection, stop_server};
 use crate::bridge::{ServerHandle, TransportEndpoint, try_admit};
 
 /// 启动 KCP 服务端（端口 0 系统分配）。
@@ -61,6 +61,7 @@ pub fn start_server(
 }
 
 /// acceptor 任务：绑定监听 → 注册句柄 → accept 循环。
+#[allow(clippy::too_many_arguments)]
 async fn server_task(
     server_id: u64,
     port: u16,
@@ -98,7 +99,11 @@ async fn server_task(
         conn_count,
     )
     .await;
-    // 循环退出：listener Drop → token 取消、socket 关闭、既有会话随之回收。
+    // 循环退出：listener Drop → token 取消、socket 关闭。
+    // 正常停止路径 entry 已被 stop_server 移除（此处返回 false 无操作）；
+    // accept 错误路径在此兜底注销服务端并关闭既有连接，避免 SERVERS 残留。
+    drop(listener);
+    let _ = stop_server(server_id);
 }
 
 /// 绑定并启动监听。socket 经 socket_util 统一底座（双栈/缓冲/REUSEADDR）。
@@ -147,10 +152,7 @@ async fn accept_loop(
     loop {
         let accepted = tokio::select! {
             _ = stop_rx.recv() => None,
-            acc = listener.accept() => match acc {
-                Ok(pair) => Some(pair),
-                Err(_) => None,
-            },
+            acc = listener.accept() => acc.ok(),
         };
         let Some((stream, peer)) = accepted else {
             break;

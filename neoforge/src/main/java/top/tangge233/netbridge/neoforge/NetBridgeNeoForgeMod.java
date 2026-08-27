@@ -22,9 +22,13 @@ public class NetBridgeNeoForgeMod {
     public static final String MOD_ID = "net_bridge";
 
     public NetBridgeNeoForgeMod(IEventBus modBus) {
-        NativeLoader.load();
-        ClientConfig.useConfigFile(FMLPaths.CONFIGDIR.get().resolve("net-bridge/client.toml"));
-        NetBridge.LOGGER.info("net-bridge NeoForge loaded: native ABI {}", NativeBridge.version());
+        if (!NativeLoader.load()) {
+            NetBridge.LOGGER.error(
+                    "net-bridge native unavailable; accelerated transports disabled (TCP fallback)");
+        } else {
+            ClientConfig.useConfigFile(FMLPaths.CONFIGDIR.get().resolve("net-bridge/client.toml"));
+            NetBridge.LOGGER.info("net-bridge NeoForge loaded: native ABI {}", NativeBridge.version());
+        }
         NeoForge.EVENT_BUS.addListener((ServerStartedEvent e) -> {
             var server = e.getServer();
             NativeAcceptor.setConnectionHandler(connId -> NativeServerTransport.adopt(server, connId));

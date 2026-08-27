@@ -18,7 +18,7 @@ use super::connection::run_kcp_connection;
 use super::fec_stream::FecStream;
 use crate::bridge::error::{BridgeError, Transport};
 use crate::bridge::registry::{allocate_id, conns, remove_conn, report_error, runtime};
-use crate::bridge::{Command, ConnHandle, STATE_CONNECTED, STATE_CONNECTING};
+use crate::bridge::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
 
 /// 发起 KCP 连接（异步建立，立即返回连接 id）。
 pub fn connect(host: &str, port: u16, profile: KcpProfile) -> Result<u64, BridgeError> {
@@ -89,7 +89,11 @@ async fn connect_task(
         return;
     };
     // 握手完成即双向可达（相对旧探测帧模型：无需首个数据帧）。
-    state.store(STATE_CONNECTED, Ordering::SeqCst);
+    // 外部已置 CLOSED（watchdog 超时收口）时不复活；run_kcp_connection
+    // 见 CLOSED 即收尾清理，避免向已关闭的 Java 侧通道续写。
+    if state.load(Ordering::SeqCst) != STATE_CLOSED {
+        state.store(STATE_CONNECTED, Ordering::SeqCst);
+    }
     run_kcp_connection(
         conn_id,
         FecStream::new(stream),

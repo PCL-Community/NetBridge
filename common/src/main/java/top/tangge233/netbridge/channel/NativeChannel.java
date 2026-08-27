@@ -152,11 +152,13 @@ public class NativeChannel extends AbstractChannel {
         return true;
     }
 
+    /** 无本地绑定：客户端端口由 native 分派，恒返回占位地址。 */
     @Override
     protected SocketAddress localAddress0() {
         return LOCAL_ADDRESS;
     }
 
+    /** 真实对端地址：连接前为传入目标，adopt 后为 native 上报地址。 */
     @Override
     protected SocketAddress remoteAddress0() {
         return remoteAddress;
@@ -167,11 +169,13 @@ public class NativeChannel extends AbstractChannel {
         // 客户端端口由 native 侧自行分配，无本地 bind。
     }
 
+    /** 与 close 等价：无独立半开状态。 */
     @Override
     protected void doDisconnect() {
         doClose();
     }
 
+    /** 幂等关闭：停轮询并向 native 发送 Close（清理注册表句柄）。 */
     @Override
     protected void doClose() {
         if (!closed.compareAndSet(false, true)) {
@@ -189,6 +193,7 @@ public class NativeChannel extends AbstractChannel {
         }
     }
 
+    /** 标记读就绪并首次启动轮询器（无 AutoRead 时的单次读触发）。 */
     @Override
     protected void doBeginRead() {
         readRequested = true;
@@ -204,53 +209,59 @@ public class NativeChannel extends AbstractChannel {
         }
         int maxMessages = maxMessagesPerWrite();
         int written = 0;
-        while (written < maxMessages) {
-            Object msg = in.current();
-            if (msg == null) {
-                break;
+        while (written < maxMessages && in.current() != null) {
+            int r = writeMessage(in, in.current());
+            if (r != 1) {
+                break; // 保留待重试（0）或连接级失败（-1）。
             }
-            if (!(msg instanceof ByteBuf buf)) {
-                in.remove(new UnsupportedOperationException("unsupported message type: " + msg.getClass()));
-                continue;
-            }
-            int readable = buf.readableBytes();
-            if (readable == 0) {
-                in.remove();
-                continue;
-            }
-            // 拷进线程共享的 WRITE_SCRATCH（JNI 边界需连续 byte[]，见字段注释）。
-            byte[] data;
-            if (readable <= MAX_SCRATCH_BYTES) {
-                byte[] scratch = WRITE_SCRATCH.get();
-                if (scratch.length < readable) {
-                    scratch = new byte[Math.max(readable, scratch.length << 1)];
-                    WRITE_SCRATCH.set(scratch);
-                }
-                data = scratch;
-            } else {
-                data = new byte[readable];
-            }
-            buf.getBytes(buf.readerIndex(), data, 0, readable);
-            int accepted = NativeBridge.writeChunk(connId, data, readable);
-            if (accepted < 0) {
-                in.remove(new IOException("native write failed (conn " + connId + ", see net-bridge-native log)"));
-                unsafe().close(voidPromise());
-                return;
-            }
-            if (accepted == 0) {
-                // 队列满或未就绪：保留消息，稍后重试。
-                break;
-            }
-            if (accepted < readable) {
-                // 理论上 writeChunk 全收或全拒；保守起见保留未完成部分。
-                break;
-            }
-            in.remove();
             written++;
         }
         // 队列仍有剩余时无需另排重试任务：轮询器必调 unsafe().flush()（见 poll()）。
     }
 
+    /**
+     * 写出单条 outbound 消息（所有权仍归 outbound buffer，按结果移除）。
+     *
+     * @return 1 = 已完整写走（消息已移除）；0 = 队列满/未就绪，保留重试；-1 = 连接级失败，通道已关闭
+     */
+    private int writeMessage(ChannelOutboundBuffer in, Object msg) {
+        if (!(msg instanceof ByteBuf buf)) {
+            in.remove(new UnsupportedOperationException("unsupported message type: " + msg.getClass()));
+            return 1;
+        }
+        int readable = buf.readableBytes();
+        if (readable == 0) {
+            in.remove();
+            return 1;
+        }
+        // 拷进线程共享的 WRITE_SCRATCH（JNI 边界需连续 byte[]，见字段注释）。
+        byte[] data;
+        if (readable <= MAX_SCRATCH_BYTES) {
+            byte[] scratch = WRITE_SCRATCH.get();
+            if (scratch.length < readable) {
+                scratch = new byte[Math.max(readable, scratch.length << 1)];
+                WRITE_SCRATCH.set(scratch);
+            }
+            data = scratch;
+        } else {
+            data = new byte[readable];
+        }
+        buf.getBytes(buf.readerIndex(), data, 0, readable);
+        int accepted = NativeBridge.writeChunk(connId, data, readable);
+        if (accepted < 0) {
+            in.remove(new IOException("native write failed (conn " + connId + ", see net-bridge-native log)"));
+            unsafe().close(voidPromise());
+            return -1;
+        }
+        if (accepted < readable) {
+            // 队列满(0)或未就绪：保留消息稍后重试（writeChunk 全收或全拒，保守处理）。
+            return 0;
+        }
+        in.remove();
+        return 1;
+    }
+
+    /** 只接受 ByteBuf 消息，其余类型直接拒绝。 */
     @Override
     protected Object filterOutboundMessage(Object msg) {
         if (msg instanceof ByteBuf) {
@@ -269,6 +280,7 @@ public class NativeChannel extends AbstractChannel {
         return !closed.get();
     }
 
+    /** 连接建立且未关闭视为 active。 */
     @Override
     public boolean isActive() {
         return connected && isOpen();
@@ -416,6 +428,7 @@ public class NativeChannel extends AbstractChannel {
         return data.length;
     }
 
+    /** 首次启动轮询器（异步连接立即返回；握手完成由 poll 感知）。 */
     private void startPoller(ChannelPromise promise) {
         this.connectPromise = promise;
         pollDelayMs = BACKOFF_STEPS_MS[0];
@@ -446,6 +459,7 @@ public class NativeChannel extends AbstractChannel {
         pollTask = eventLoop().schedule(this::poll, next, TimeUnit.MILLISECONDS);
     }
 
+    /** 取消当前待执行轮询（已在跑的在 event loop 内天然串行）。 */
     private void stopPoller() {
         ScheduledFuture<?> task = pollTask;
         pollTask = null;
@@ -455,6 +469,10 @@ public class NativeChannel extends AbstractChannel {
     }
 
     private final class NativeUnsafe extends AbstractUnsafe {
+        /**
+         * 加载 native 库并发起异步连接；连接 promise 由轮询器在
+         * CONNECTED/FAILED/CLOSED 时完成，失败才回退 TCP。
+         */
         @Override
         public void connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
             if (!promise.setUncancellable()) {
@@ -471,7 +489,11 @@ public class NativeChannel extends AbstractChannel {
             try {
                 InetSocketAddress target = (InetSocketAddress) remoteAddress;
                 NativeChannel.this.remoteAddress = target;
-                NativeLoader.load();
+                if (!NativeLoader.load()) {
+                    promise.tryFailure(
+                            new ConnectException("net-bridge native library unavailable"));
+                    return;
+                }
                 int kind = earlyWrite ? NativeBridge.KIND_KCP : NativeBridge.KIND_QUIC;
                 String profile =
                         kind == NativeBridge.KIND_KCP ? ClientConfig.kcpProfile().configValue() : null;
