@@ -36,7 +36,7 @@ jobs:
             dir: windows-x86_64
             lib: net_bridge_native.dll
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -55,7 +55,7 @@ jobs:
         run: mkdir -p stage/${{ matrix.dir }} && cp rust/net-bridge-native/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
 
       - name: Upload native library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.dir }}
           path: stage
@@ -66,14 +66,14 @@ jobs:
     needs: native
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.7.1'
 
@@ -81,7 +81,7 @@ jobs:
       # build/native/<os>-<arch>/，jar 打包时原样打入，
       # 运行时由 NativeLoader 按 OS+架构选择对应库。
       - name: Download all native libraries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: native-*
           path: build/native
@@ -93,7 +93,7 @@ jobs:
         run: gradle build assembleAll -PnativeProfile=release -PskipNativeBuild "-PmodVersion=${GITHUB_REF_NAME#v}"
 
       - name: Upload mod jars
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mod-jars
           path: build/libs/*.jar
@@ -105,7 +105,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download mod jars
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: mod-jars
           path: dist
