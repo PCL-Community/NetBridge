@@ -15,6 +15,7 @@
 //! 等待。回调未注册（单测/旧流程）时静默跳过，Java 轮询兜底仍在。
 
 pub mod bridge;
+pub mod ring_pipe;
 pub mod transport;
 
 use std::sync::OnceLock;

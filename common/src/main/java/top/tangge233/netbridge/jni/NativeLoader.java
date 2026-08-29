@@ -29,7 +29,7 @@ public final class NativeLoader {
 
     /**
      * 当前平台目录名（{@code <os>-<arch>}，与 Gradle buildCdylib、CI
-     * matrix 的 stage 目录一致）：linux/macos/windows × x86_64/aarch64。
+     * matrix 的 stage 目录一致）：linux/macos/windows + x86_64/aarch64。
      */
     public static String platformDir() {
         String os = System.getProperty("os.name", "").toLowerCase();
