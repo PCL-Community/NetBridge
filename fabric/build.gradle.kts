@@ -1,0 +1,64 @@
+plugins {
+    `java-library`
+    alias(libs.plugins.fabric.loom)
+}
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+    withSourcesJar()
+}
+
+dependencies {
+    minecraft(libs.minecraft)
+    mappings(loom.officialMojangMappings())
+    modImplementation(libs.fabric.loader)
+
+    implementation(project(":common"))
+    implementation(libs.bundles.netty)
+}
+
+val libBundle = configurations.create("libBundle") {
+    isTransitive = false
+}
+
+dependencies {
+    libBundle(libs.toml4j)
+    libBundle(libs.nightconfig.core)
+    libBundle(libs.nightconfig.toml)
+}
+
+tasks.named<ProcessResources>("processResources") {
+    inputs.property("version", project.version)
+    filesMatching("fabric.mod.json") {
+        expand(mapOf("version" to project.version))
+    }
+}
+
+val cdylibDir = rootProject.layout.buildDirectory.dir("native")
+
+tasks.named<Jar>("jar") {
+    dependsOn(rootProject.tasks.named("buildCdylib"))
+    from(cdylibDir) {
+        into("native/")
+    }
+    from(project(":common").the<SourceSetContainer>()["main"].output)
+    from(libBundle.elements.map { elements ->
+        elements.map { zipTree(it.asFile) }
+    }) {
+        exclude("META-INF/**")
+    }
+}
+
+val fabricJarConfig = configurations.create("fabricJarConfig") {
+    isCanBeConsumed = true
+    isCanBeResolved = false
+}
+
+artifacts {
+    add(
+        fabricJarConfig.name,
+        tasks.named("remapJar")
+    )
+}
