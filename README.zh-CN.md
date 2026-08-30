@@ -98,4 +98,6 @@ make clean
 
 ## 许可证
 
-本项目基于 [GNU Affero General Public License v3.0](LICENSE) 授权。
+本项目基于 [LGPL-v3](LICENSE) 授权。
+
+> 在 v0.0.5 版本及之前使用 APGL-v3 授权。

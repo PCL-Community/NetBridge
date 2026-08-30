@@ -98,4 +98,6 @@ make clean
 
 ## License
 
-This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+This project is licensed under the [LGPL-v3](LICENSE).
+
+> v0.0.5 and before are licensed under the AGPL-v3
