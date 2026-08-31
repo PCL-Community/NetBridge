@@ -2,6 +2,7 @@ package top.tangge233.netbridge.transport;
 
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.ability.NetworksAbility;
+import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.net.InetSocketAddress;
 import java.util.Collections;
@@ -62,7 +63,7 @@ public final class TransportSelector {
      * @return 加速目标；空表示直接走原版 TCP
      */
     public static Optional<TransportTarget> decide(@Nullable InetSocketAddress tcpAddress) {
-        var mode = ClientConfig.mode();
+        var mode = NetBridgeServices.clientSettings().current().mode();
         if (mode == TransportMode.TCP || tcpAddress == null) {
             return Optional.empty();
         }
@@ -88,7 +89,12 @@ public final class TransportSelector {
                                     : "not advertised"
                     )
                     : "unsupported protocol or disabled";
-            NetBridge.LOGGER.info("Transport for {}: TCP (mode={}, {})", tcpAddress, mode, reason);
+            NetBridge.LOGGER.info(
+                    "Transport for {}: TCP (mode={}, {})",
+                    tcpAddress,
+                    mode,
+                    reason
+            );
             return Optional.empty();
         }
 

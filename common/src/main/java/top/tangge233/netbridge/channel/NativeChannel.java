@@ -7,7 +7,7 @@ import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.jni.NativeBridge;
 import top.tangge233.netbridge.jni.NativeConnState;
 import top.tangge233.netbridge.jni.NativeLoader;
-import top.tangge233.netbridge.transport.ClientConfig;
+import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.io.IOException;
 import java.net.ConnectException;
@@ -95,6 +95,7 @@ public class NativeChannel extends AbstractChannel {
     private volatile @Nullable ScheduledFuture<?> pollTask;
     private volatile long pollDelayMs = BACKOFF_STEPS_MS[0];
     private volatile @Nullable ChannelPromise connectPromise;
+
     public NativeChannel() {
         this(false);
     }
@@ -612,10 +613,13 @@ public class NativeChannel extends AbstractChannel {
                 var kind = earlyWrite
                         ? NativeBridge.KIND_KCP
                         : NativeBridge.KIND_QUIC;
-                var profile =
-                        kind == NativeBridge.KIND_KCP
-                                ? ClientConfig.kcpProfile().configValue()
-                                : null;
+                var profile = kind == NativeBridge.KIND_KCP
+                        ?
+                        NetBridgeServices.clientSettings()
+                                .current()
+                                .kcpProfile()
+                                .configValue()
+                        : null;
                 var id = NativeBridge.connect(
                         kind,
                         target.getHostString(),

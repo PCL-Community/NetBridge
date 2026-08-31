@@ -21,7 +21,6 @@ val libBundle = configurations.create("libBundle") {
 }
 
 dependencies {
-    libBundle(libs.toml4j)
     libBundle(libs.nightconfig.core)
     libBundle(libs.nightconfig.toml)
 }

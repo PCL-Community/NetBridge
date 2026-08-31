@@ -8,7 +8,7 @@ plugins {
 dependencies {
     implementation(libs.slf4j)
     implementation(libs.gson)
-    api(libs.toml4j)
+    api(libs.nightconfig.core)
     api(libs.nightconfig.toml)
     implementation(libs.bundles.netty)
 }

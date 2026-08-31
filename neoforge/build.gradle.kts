@@ -8,14 +8,6 @@ dependencies {
     implementation(libs.mixin)
 }
 
-val libBundle = configurations.create("libBundle") {
-    isTransitive = false
-}
-
-dependencies {
-    libBundle(libs.toml4j)
-}
-
 tasks.named<ProcessResources>("processResources") {
     inputs.property("version", project.version)
     filesMatching("META-INF/neoforge.mods.toml") {
@@ -42,11 +34,6 @@ val jarNeoForge = tasks.register<Jar>("jarNeoForge") {
     from(project(":common").the<SourceSetContainer>()["main"].output)
     from(cdylibDir) {
         into("native/")
-    }
-    from(libBundle.elements.map { elements ->
-        elements.map { zipTree(it.asFile) }
-    }) {
-        exclude("META-INF/**")
     }
 }
 
