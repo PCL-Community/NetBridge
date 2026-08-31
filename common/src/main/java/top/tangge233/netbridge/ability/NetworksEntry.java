@@ -2,6 +2,8 @@ package top.tangge233.netbridge.ability;
 
 import com.google.gson.JsonObject;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * networks 能力对象中单个传输条目：{@code {enable, host, port, protocol}}。
  *
@@ -15,7 +17,13 @@ import com.google.gson.JsonObject;
  *   <li>{@code protocol}：版本串，经 {@link TransportProtocol#isSupported} 精确比对。</li>
  * </ul>
  */
-public record NetworksEntry(boolean enable, String host, int port, String protocol) {
+public record NetworksEntry(
+        boolean enable,
+        @Nullable String host,
+        int port,
+        @Nullable String protocol
+) {
+
     public static final String KEY_ENABLE = "enable";
     public static final String KEY_HOST = "host";
     public static final String KEY_PORT = "port";
@@ -26,28 +34,33 @@ public record NetworksEntry(boolean enable, String host, int port, String protoc
      *
      * @return 解析结果；结构非法（缺 port/port 越界）返回 null，调用方应丢弃该条目
      */
-    public static NetworksEntry fromJson(JsonObject object) {
+    public static @Nullable NetworksEntry fromJson(@Nullable JsonObject object) {
         if (object == null || !object.has(KEY_PORT)) {
             return null;
         }
+
         try {
-            int port = object.get(KEY_PORT).getAsInt();
+            var port = object.get(KEY_PORT).getAsInt();
             if (port < 1 || port > 65535) {
                 return null;
             }
-            boolean enable = !object.has(KEY_ENABLE) || object.get(KEY_ENABLE).isJsonNull()
-                    ? false
-                    : object.get(KEY_ENABLE).getAsBoolean();
-            String host = object.has(KEY_HOST) && !object.get(KEY_HOST).isJsonNull()
+
+            var enable = object.has(KEY_ENABLE)
+                    && !object.get(KEY_ENABLE).isJsonNull()
+                    && object.get(KEY_ENABLE).getAsBoolean();
+            var host = object.has(KEY_HOST) && !object.get(KEY_HOST).isJsonNull()
                     ? object.get(KEY_HOST).getAsString()
                     : null;
-            String protocol =
-                    object.has(KEY_PROTOCOL) && !object.get(KEY_PROTOCOL).isJsonNull()
-                            ? object.get(KEY_PROTOCOL).getAsString()
-                            : null;
-            return new NetworksEntry(enable, host, port, protocol);
+            var protocol = object.has(KEY_PROTOCOL) && !object.get(KEY_PROTOCOL).isJsonNull()
+                    ? object.get(KEY_PROTOCOL).getAsString()
+                    : null;
+            return new NetworksEntry(
+                    enable,
+                    host,
+                    port,
+                    protocol
+            );
         } catch (RuntimeException | StackOverflowError e) {
-            // 恶意/损坏条目降级为无效，不让远程包杀死解码线程。
             return null;
         }
     }
@@ -58,13 +71,15 @@ public record NetworksEntry(boolean enable, String host, int port, String protoc
      * @param includeHost false 时省略 host 字段（语义 = 跟随服务器地址）
      */
     public JsonObject toJson(boolean includeHost) {
-        JsonObject object = new JsonObject();
+        var object = new JsonObject();
         object.addProperty(KEY_ENABLE, enable);
         if (includeHost && host != null && !host.isBlank()) {
             object.addProperty(KEY_HOST, host);
         }
         object.addProperty(KEY_PORT, port);
-        object.addProperty(KEY_PROTOCOL, protocol);
+        if (protocol != null) {
+            object.addProperty(KEY_PROTOCOL, protocol);
+        }
         return object;
     }
 
@@ -72,6 +87,10 @@ public record NetworksEntry(boolean enable, String host, int port, String protoc
      * 该条目对客户端是否可用：已启用、端口在 1..=65535、protocol 在支持集内。
      */
     public boolean usable() {
-        return enable && port >= 1 && port <= 65535 && TransportProtocol.isSupported(protocol);
+        return enable
+                && port >= 1
+                && port <= 65535
+                && TransportProtocol.isSupported(protocol);
     }
+
 }

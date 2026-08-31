@@ -16,9 +16,9 @@ junit = "6.1.3"
 
 jspecify = "1.0.1"
 nullaway = "0.13.8"
+errorprone-core = "2.36.0"
 errorprone-gradle = "5.1.0"
 nullaway-gradle = "3.1.0"
-foojay-resolver = "0.9.0"
 
 [libraries]
 minecraft = { module = "com.mojang:minecraft", version.ref = "minecraft" }
@@ -49,6 +49,9 @@ junit-platform-console = { module = "org.junit.platform:junit-platform-console",
 
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
+errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone-core" }
+errorprone-gradle = { module = "net.ltgt.gradle:gradle-errorprone-plugin", version.ref = "errorprone-gradle" }
+nullaway-gradle = { module = "net.ltgt.gradle:gradle-nullaway-plugin", version.ref = "nullaway-gradle" }
 
 [bundles]
 netty = ["netty-common", "netty-buffer", "netty-transport", "netty-handler"]
@@ -59,4 +62,3 @@ fabric-loom = { id = "fabric-loom", version.ref = "fabric-loom" }
 neoforge-moddev = { id = "net.neoforged.moddev", version.ref = "neoforge-moddev" }
 errorprone = { id = "net.ltgt.errorprone", version.ref = "errorprone-gradle" }
 nullaway = { id = "net.ltgt.nullaway", version.ref = "nullaway-gradle" }
-foojay-resolver = { id = "org.gradle.toolchains.foojay-resolver-convention", version.ref = "foojay-resolver" }

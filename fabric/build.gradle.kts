@@ -1,12 +1,9 @@
 plugins {
-    `java-library`
+    id("netbridge.java-conventions")
     alias(libs.plugins.fabric.loom)
 }
 
 java {
-    toolchain {
-        languageVersion.set(JavaLanguageVersion.of(21))
-    }
     withSourcesJar()
 }
 

@@ -1,12 +1,6 @@
 plugins {
-    `java-library`
+    id("netbridge.java-conventions")
     alias(libs.plugins.neoforge.moddev)
-}
-
-java {
-    toolchain {
-        languageVersion.set(JavaLanguageVersion.of(21))
-    }
 }
 
 dependencies {
