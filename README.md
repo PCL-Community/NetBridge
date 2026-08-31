@@ -6,7 +6,7 @@
   <strong>A Minecraft mod that transports your game traffic over better network protocol</strong>
 </p>
 
-[![License](https://img.shields.io/badge/license-AGPL--v3-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-LGPL--v3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows%20%7C%20macos-lightgrey.svg)]()
 
 </div>

@@ -6,7 +6,7 @@
   <strong>一个将游戏流量承载到更优网络协议上的 Minecraft 模组</strong>
 </p>
 
-[![License](https://img.shields.io/badge/license-AGPL--v3-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-LGPL--v3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows%20%7C%20macos-lightgrey.svg)]()
 
 </div>
@@ -100,4 +100,4 @@ make clean
 
 本项目基于 [LGPL-v3](LICENSE) 授权。
 
-> 在 v0.0.5 版本及之前使用 APGL-v3 授权。
+> 在 v0.0.5 版本及之前使用 AGPL-v3 授权。
