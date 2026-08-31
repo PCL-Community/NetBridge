@@ -3,15 +3,16 @@ package top.tangge233.netbridge.ability;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.jspecify.annotations.Nullable;
 
 /**
  * 服务器列表 Ping 响应中 net-bridge 的传输能力模型。
  *
  * <p>不可变。数据模型与 wire 格式解耦：JSON 注入/解析见
- * {@link StatusNetworksCodec}；顶层 networks 表为平级扩展位，
- * 每个已知传输（quic/kcp）一个条目，未知条目原样忽略。
+ * {@link StatusNetworksCodec}；顶层 networks 表为平级扩展位， 每个已知传输（quic/kcp）一个条目，未知条目原样忽略。
  */
 public final class NetworksAbility {
+
     public static final String KEY_NETWORKS = "networks";
     public static final String KEY_QUIC = "quic";
     public static final String KEY_KCP = "kcp";
@@ -21,9 +22,10 @@ public final class NetworksAbility {
     /** 共享空实例：本类不可变，empty() 高频 miss 路径免重复分配。 */
     private static final NetworksAbility EMPTY = new NetworksAbility(Map.of());
 
-    private NetworksAbility(Map<String, NetworksEntry> entries) {
-        this.entries =
-                entries == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(entries));
+    private NetworksAbility(@Nullable Map<String, NetworksEntry> entries) {
+        this.entries = entries == null
+                ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(entries));
     }
 
     public static NetworksAbility empty() {
@@ -31,13 +33,13 @@ public final class NetworksAbility {
     }
 
     /** 以给定条目构造能力模型（null、未知协议的条目被丢弃）。 */
-    public static NetworksAbility of(NetworksEntry... entries) {
+    public static NetworksAbility of(@Nullable NetworksEntry... entries) {
         Map<String, NetworksEntry> map = new LinkedHashMap<>();
-        for (NetworksEntry entry : entries) {
+        for (var entry : entries) {
             if (entry == null) {
                 continue;
             }
-            String name = nameOf(entry);
+            var name = nameOf(entry);
             if (name != null) {
                 map.put(name, entry);
             }
@@ -46,14 +48,12 @@ public final class NetworksAbility {
     }
 
     /** 按协议版本串反查条目键名；未知协议返回 null（调用方丢弃）。 */
-    private static String nameOf(NetworksEntry entry) {
-        if (TransportProtocol.QUIC_V1.equals(entry.protocol())) {
-            return KEY_QUIC;
-        }
-        if (TransportProtocol.KCP_V1.equals(entry.protocol())) {
-            return KEY_KCP;
-        }
-        return null;
+    private static @Nullable String nameOf(NetworksEntry entry) {
+        return switch (entry.protocol()) {
+            case TransportProtocol.QUIC_V1 -> KEY_QUIC;
+            case TransportProtocol.KCP_V1 -> KEY_KCP;
+            case null, default -> null;
+        };
     }
 
     /** 全部条目（含未启用/不支持的，供诊断展示）。 */
@@ -64,7 +64,7 @@ public final class NetworksAbility {
     /**
      * 按传输名取条目（{@value #KEY_QUIC} / {@value #KEY_KCP}）；未宣告返回 null。
      */
-    public NetworksEntry entry(String name) {
+    public @Nullable NetworksEntry entry(String name) {
         return entries.get(name);
     }
 
@@ -72,7 +72,7 @@ public final class NetworksAbility {
      * 该传输名是否可用：已宣告且 {@link NetworksEntry#usable()}。
      */
     public boolean usable(String name) {
-        NetworksEntry entry = entries.get(name);
+        var entry = entries.get(name);
         return entry != null && entry.usable();
     }
 
@@ -80,4 +80,5 @@ public final class NetworksAbility {
     public boolean hasUsableAccelerated() {
         return usable(KEY_QUIC) || usable(KEY_KCP);
     }
+
 }

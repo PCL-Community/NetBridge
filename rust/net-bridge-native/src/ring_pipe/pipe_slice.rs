@@ -1,5 +1,5 @@
 pub struct PipeSlice<'a> {
-    slice: &'a [u8],
+    slice: &'a mut [u8],
 }
 
 impl<'a> PipeSlice<'a> {
@@ -8,5 +8,5 @@ impl<'a> PipeSlice<'a> {
         self.slice
     }
 
-    pub fn ensure(used: usize) {}
+    pub fn ensure(_used: usize) {}
 }
