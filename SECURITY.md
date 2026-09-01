@@ -6,6 +6,8 @@
 | ------- | ------------------ |
 | 0.0.x   | :white_check_mark: |
 
+## Report issue
+
 We take security vulnerabilities seriously. 
 If you believe you have found a security issue, 
 please report it to us by sending an email to **tangge233@qq.com**.
