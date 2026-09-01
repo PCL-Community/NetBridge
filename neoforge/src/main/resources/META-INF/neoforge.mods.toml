@@ -1,12 +1,19 @@
-modLoader="javafml"
-loaderVersion="[1,)"
-license="AGPL-3.0"
+modLoader = "javafml"
+loaderVersion = "[1,)"
+license = "AGPL-3.0"
 
 [[mods]]
-modId="net_bridge"
-version="${version}"
-displayName="net-bridge (NeoForge)"
-description="QUIC transport capability for Minecraft (quinn-plaintext, transparent byte stream replacement)."
+modId = "net_bridge"
+version = "${version}"
+displayName = "net-bridge (NeoForge)"
+description = "QUIC transport capability for Minecraft (quinn-plaintext, transparent byte stream replacement)."
 
 [[mixins]]
-config="net-bridge-neoforge.mixins.json"
+config = "net-bridge-neoforge.mixins.json"
+
+[[dependencies.net_bridge]]
+modId = "java"
+type = "required"
+versionRange = "[25,)"
+ordering = "NONE"
+side = "BOTH"

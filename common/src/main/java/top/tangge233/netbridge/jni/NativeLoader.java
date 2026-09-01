@@ -6,10 +6,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Locale;
 
-/**
- * 从打包 jar 中解出原生库并加载（按 {@code native/<os>-<arch>/} 选择 .so/.dylib/.dll，覆盖 linux/macos/windows ×
- * x86_64/aarch64）。
- */
 public final class NativeLoader {
 
     private static boolean loaded;
@@ -17,15 +13,6 @@ public final class NativeLoader {
     private NativeLoader() {
     }
 
-    /**
-     * 优先 classpath 内置库（打包进 jar 的可信版本），失败回退 java.library.path（Gradle test 用 -Djava.library.path）。
-     * 先加载 system 会优先命中库路径中被移植的同名文件（二进制种植面）， 内置版本不可被外部替换。
-     *
-     * <p>加载成功后校验 ABI 版本（{@link NativeBridge#EXPECTED_ABI_VERSION}）：
-     * 不匹配即记录日志。库不可用或 ABI 不匹配返回 false（调用方降级纯 TCP， 不得让客户端初始化/服务器启动崩溃）。
-     *
-     * @return 加载成功且 ABI 匹配返回 true；幂等，已成功加载亦返回 true
-     */
     public static synchronized boolean load() {
         if (loaded) {
             return true;
@@ -52,10 +39,10 @@ public final class NativeLoader {
             return false;
         }
 
+        loaded = true;
         return true;
     }
 
-    /** 加载打包在 classpath 中的原生库（LD_LIBRARY_PATH 不满足时使用）。 */
     public static synchronized void loadFromClasspath() {
         if (loaded) {
             return;
@@ -76,23 +63,19 @@ public final class NativeLoader {
             }
 
             System.load(tmp.toAbsolutePath().toString());
-            loaded = true;
         } catch (IOException e) {
             throw new RuntimeException("Failed to load net-bridge native from classpath", e);
         }
     }
 
-    /** 尝试直接从 java.library.path 或系统路径加载（Gradle test 用 -Djava.library.path 时）。 */
     public static synchronized void loadSystem() {
         if (loaded) {
             return;
         }
 
         System.loadLibrary("net_bridge_native");
-        loaded = true;
     }
 
-    /** 校验 native ABI 版本；不匹配即抛出并记录双方版本号。 */
     private static void verifyAbi() {
         String actual;
         try {
@@ -113,7 +96,6 @@ public final class NativeLoader {
         }
     }
 
-    /** 注册数据到达回调；失败仅记日志（轮询兜底仍在，不阻断启动）。 */
     private static void registerNotify() {
         try {
             NativeBridge.registerNotifyCallback();
@@ -125,12 +107,10 @@ public final class NativeLoader {
         }
     }
 
-    /** jar 内原生库资源全路径：{@code native/<os>-<arch>/<文件名>}。 */
     public static String nativeResourcePath() {
         return "native/" + platformDir() + "/" + nativeResourceName();
     }
 
-    /** 确定当前平台原生库文件名。 */
     public static String nativeResourceName() {
         var os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
 
@@ -142,10 +122,6 @@ public final class NativeLoader {
         };
     }
 
-    /**
-     * 当前平台目录名（{@code <os>-<arch>}，与 Gradle buildCdylib、CI matrix 的 stage 目录一致）：linux/macos/windows
-     * + x86_64/aarch64。
-     */
     public static String platformDir() {
         var os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         var arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);

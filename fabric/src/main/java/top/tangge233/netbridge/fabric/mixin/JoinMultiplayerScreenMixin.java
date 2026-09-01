@@ -28,9 +28,10 @@ public abstract class JoinMultiplayerScreenMixin extends Screen {
         var button =
                 CycleButton.builder((TransportMode mode) ->
                                 Component.translatable("netbridge.transport." + mode.configValue())
-                                        .withStyle(mode == TransportMode.TCP
-                                                ? ChatFormatting.WHITE
-                                                : ChatFormatting.AQUA
+                                        .withStyle(
+                                                mode == TransportMode.TCP
+                                                        ? ChatFormatting.WHITE
+                                                        : ChatFormatting.AQUA
                                         )
                         )
                         .withValues(TransportMode.values())

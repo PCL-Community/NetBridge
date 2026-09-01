@@ -11,7 +11,7 @@ val libs = extensions.getByType<VersionCatalogsExtension>().named("libs")
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(21))
+        languageVersion.set(JavaLanguageVersion.of(25))
     }
 }
 
@@ -29,6 +29,7 @@ nullaway {
 
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
+    options.release.set(25)
     options.errorprone {
         nullaway {
             error()

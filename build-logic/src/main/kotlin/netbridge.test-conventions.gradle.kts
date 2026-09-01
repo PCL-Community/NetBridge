@@ -13,6 +13,7 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
     testLogging {
         events("passed", "skipped", "failed")
         showExceptions = true

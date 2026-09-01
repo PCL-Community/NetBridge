@@ -11,12 +11,16 @@ import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.fabric.mc.NativeClientTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.transport.ConnectionDisplay;
-import top.tangge233.netbridge.transport.TransportMode;
 import top.tangge233.netbridge.transport.TransportSelector;
-import top.tangge233.netbridge.transport.TransportTarget;
 
 import java.net.InetSocketAddress;
 
+/**
+ * 客户端出站连接拦截：目标宣告了可用加速传输且模式开启时改用 native 通道； 握手两次失败自动回退原版 TCP。
+ *
+ * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
+ * 修改时必须同步两处。
+ */
 @Mixin(Connection.class)
 public abstract class ConnectionMixin {
 
@@ -64,7 +68,8 @@ public abstract class ConnectionMixin {
                             useEpoll,
                             connection,
                             target
-                    ));
+                    )
+            );
         } finally {
             NETBRIDGE_IN_PROGRESS.remove();
         }

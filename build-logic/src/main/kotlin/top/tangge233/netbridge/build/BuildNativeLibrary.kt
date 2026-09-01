@@ -47,7 +47,7 @@ abstract class BuildNativeLibrary @Inject constructor(
         }
 
         val cargoDirectory = cargoDir.get().asFile
-        val cargoArgs = mutableListOf("cargo", "build")
+        val cargoArgs = mutableListOf("cargo", "build", "-p", "net-bridge-native")
         if (prof == "release") {
             cargoArgs.add("--release")
         }

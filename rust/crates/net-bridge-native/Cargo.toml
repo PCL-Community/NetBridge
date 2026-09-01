@@ -1,0 +1,15 @@
+[package]
+name = "net-bridge-native"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+
+[lib]
+name = "net_bridge_native"
+crate-type = ["cdylib", "lib"]
+path = "src/lib.rs"
+
+[dependencies]
+net-bridge-core = { path = "../net-bridge-core" }
+jni = "0.22"
+

@@ -42,17 +42,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust/net-bridge-native
+          workspaces: rust
 
       - name: Build Rust cdylib
-        working-directory: rust/net-bridge-native
-        run: cargo build --release
+        working-directory: rust
+        run: cargo build -p net-bridge-native --release
 
       # artifact 内保持 <dir>/<lib> 结构；package job merge-multiple 后
       # 恰好还原为 build/native/<dir>/<lib>，Gradle 原样打入 jar。
       - name: Stage native library
         shell: bash
-        run: mkdir -p stage/${{ matrix.dir }} && cp rust/net-bridge-native/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
+        run: mkdir -p stage/${{ matrix.dir }} && cp rust/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
 
       - name: Upload native library
         uses: actions/upload-artifact@v7
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
 
       - uses: gradle/actions/setup-gradle@v6
         with:

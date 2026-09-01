@@ -65,7 +65,9 @@ public final class NativeClientTransport {
                 "Transport {} to {} failed twice ({}), falling back to TCP",
                 target.mode(),
                 tcpAddress,
-                last.getMessage()
+                last != null
+                        ? last.getMessage()
+                        : "unknown error"
         );
         ConnectStatus.fallingBack();
         try {
@@ -120,7 +122,7 @@ public final class NativeClientTransport {
     private static void closeQuietly(Channel channel) {
         try {
             channel.close().syncUninterruptibly();
-        } catch (Throwable ignored) {
+        } catch (Throwable _) {
         }
     }
 

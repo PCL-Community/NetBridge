@@ -24,7 +24,7 @@ tasks.register<BuildNativeLibrary>("buildCdylib") {
     description = "Builds the native Rust cdylib and stages it for packaging."
     profile.set(nativeProfileProperty)
     skipNativeBuild.set(skipNativeBuildProperty)
-    cargoDir.set(layout.projectDirectory.dir("rust/net-bridge-native"))
+    cargoDir.set(layout.projectDirectory.dir("rust"))
     outputDir.set(layout.buildDirectory.dir("native"))
 }
 
