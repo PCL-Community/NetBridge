@@ -1,5 +1,9 @@
 //! net-bridge-native：QUIC / KCP 传输的 JNI 桥（临时过渡适配器）。
 
+pub mod abi;
+
+pub use abi::netbridge_get_api;
+
 use std::sync::{Arc, OnceLock};
 
 use jni::errors::Error;
@@ -165,12 +169,12 @@ pub extern "system" fn java_top_tangge233_netbridge_jni_native_bridge_version(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn java_top_tangge233_netbridge_jni_native_bridge_register_notify_callback(
+pub extern "system" fn Java_top_tangge233_netbridge_jni_NativeBridge_registerNotifyCallback(
     mut env: EnvUnowned,
     class: JClass,
 ) {
     let _ = net_bridge_core::set_event_sink(Arc::new(JniEventSink));
-    let _ = resolve_default(
+    resolve_default(
         env.with_env(|env| {
             let method =
                 env.get_static_method_id(&class, jni_str!("onDataAvailable"), jni_sig!("(J)V"))?;

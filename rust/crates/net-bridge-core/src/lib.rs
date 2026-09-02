@@ -1,6 +1,7 @@
 //! net-bridge-core: Pure Rust transport core for QUIC and KCP.
 #![forbid(unsafe_code)]
 
+pub mod context;
 pub mod dataplane;
 pub mod error;
 pub mod event;
@@ -12,6 +13,7 @@ pub mod transport;
 #[cfg(test)]
 mod tests;
 
+pub use context::NativeContext;
 pub use dataplane::{close_connection, connection_state, read_chunk, write_chunk};
 pub use error::BridgeError;
 pub use event::{EventSink, NoopEventSink, get_event_sink, set_event_sink};

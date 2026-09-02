@@ -47,6 +47,73 @@ pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
     Ok(conn_id)
 }
 
+/// 经 NativeContext 发起 QUIC 客户端连接。
+pub fn connect_in_context(
+    ctx: &Arc<crate::context::NativeContext>,
+    host: &str,
+    port: u16,
+) -> Result<u64, BridgeError> {
+    let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
+    let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
+    let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
+    let conn_id = ctx.allocate_id();
+    ctx.conns().insert(
+        conn_id,
+        ConnHandle::new(
+            state.clone(),
+            to_java_rx,
+            to_transport_tx.clone(),
+            None,
+            None,
+            false,
+            true,
+            None,
+        ),
+    );
+
+    let host = host.to_string();
+    let ctx_clone = Arc::clone(ctx);
+    let ctx_cleanup = Arc::clone(ctx);
+    ctx.handle().spawn(async move {
+        let panicked = guarded("quic connect task in context", async move {
+            let mut rx = to_transport_rx;
+            if let Some((conn, send, recv)) = establish(&host, port, conn_id, &state, &mut rx).await
+            {
+                state.store(STATE_CONNECTED, Ordering::SeqCst);
+                ctx_clone.event_sink().on_event(
+                    crate::event::NB_EVENT_CONNECTION_STATE,
+                    conn_id,
+                    STATE_CONNECTED as i64,
+                    0,
+                );
+                super::connection::run_connection_with_sink(
+                    conn_id,
+                    conn,
+                    send,
+                    recv,
+                    rx,
+                    to_java_tx,
+                    to_transport_tx,
+                    state,
+                    ctx_clone.event_sink().clone(),
+                    {
+                        let c = Arc::clone(&ctx_clone);
+                        Box::new(move |id| {
+                            c.remove_conn(id);
+                        })
+                    },
+                )
+                .await;
+            }
+        })
+        .await;
+        if panicked {
+            ctx_cleanup.remove_conn(conn_id);
+        }
+    });
+    Ok(conn_id)
+}
+
 /// 注册占位句柄（状态 CONNECTING）并返回建连任务与数据循环所需各端。
 fn register_client() -> (
     u64,

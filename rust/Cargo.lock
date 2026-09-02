@@ -573,6 +573,7 @@ dependencies = [
 name = "net-bridge-native"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "jni",
  "net-bridge-core",
 ]

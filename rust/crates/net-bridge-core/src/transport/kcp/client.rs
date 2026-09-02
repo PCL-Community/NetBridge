@@ -47,6 +47,78 @@ pub fn connect(host: &str, port: u16, profile: KcpProfile) -> Result<u64, Bridge
     Ok(conn_id)
 }
 
+/// 经 NativeContext 发起 KCP 客户端连接。
+pub fn connect_in_context(
+    ctx: &Arc<crate::context::NativeContext>,
+    host: &str,
+    port: u16,
+    profile: KcpProfile,
+) -> Result<u64, BridgeError> {
+    let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
+    let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
+    let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
+    let conn_id = ctx.allocate_id();
+    ctx.conns().insert(
+        conn_id,
+        ConnHandle::new(
+            state.clone(),
+            to_java_rx,
+            to_transport_tx,
+            None,
+            None,
+            true,
+            true,
+            None,
+        ),
+    );
+    let host = host.to_string();
+    let ctx_clone = Arc::clone(ctx);
+    let ctx_cleanup = Arc::clone(ctx);
+    ctx.handle().spawn(async move {
+        let panicked = guarded("kcp connect task in context", async move {
+            let Some(addr) = resolve_host(conn_id, &state, &host, port).await else {
+                return;
+            };
+            let Some(udp) = client_udp(conn_id, &state, addr) else {
+                return;
+            };
+            let Some(stream) = establish_kcp(conn_id, &state, addr, udp, profile).await else {
+                return;
+            };
+            if state.load(Ordering::SeqCst) != STATE_CLOSED {
+                state.store(STATE_CONNECTED, Ordering::SeqCst);
+                ctx_clone.event_sink().on_event(
+                    crate::event::NB_EVENT_CONNECTION_STATE,
+                    conn_id,
+                    STATE_CONNECTED as i64,
+                    0,
+                );
+            }
+            super::connection::run_kcp_connection_with_sink(
+                conn_id,
+                FecStream::new(stream),
+                to_transport_rx,
+                to_java_tx,
+                state,
+                true,
+                ctx_clone.event_sink().clone(),
+                {
+                    let c = Arc::clone(&ctx_clone);
+                    Box::new(move |id| {
+                        c.remove_conn(id);
+                    })
+                },
+            )
+            .await;
+        })
+        .await;
+        if panicked {
+            ctx_cleanup.remove_conn(conn_id);
+        }
+    });
+    Ok(conn_id)
+}
+
 fn register_client() -> (
     u64,
     Arc<AtomicU32>,

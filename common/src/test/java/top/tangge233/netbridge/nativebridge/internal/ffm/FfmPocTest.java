@@ -1,0 +1,313 @@
+package top.tangge233.netbridge.nativebridge.internal.ffm;
+
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import top.tangge233.netbridge.nativebridge.NativeEvent;
+
+import java.lang.foreign.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Phase 4: FFM 架构 4 项核心 POC 验证与集成测试。
+ */
+class FfmPocTest {
+
+    private static Path nativeLibPath;
+
+    @BeforeAll
+    static void setUp() {
+        nativeLibPath = FfmTestSupport.findNativeLibrary();
+    }
+
+    /**
+     * POC 1: Java 25 SymbolLookup.libraryLookup 加载 Rust cdylib 并定位 bootstrap 符号。
+     */
+    @Test
+    void testPoc1SymbolLookupLoadsCdylib() {
+        try (var arena = Arena.ofConfined()) {
+            var lookup = SymbolLookup.libraryLookup(nativeLibPath, arena);
+            var symbolOpt = lookup.find("netbridge_get_api");
+            assertTrue(
+                    symbolOpt.isPresent(),
+                    "netbridge_get_api symbol must be exported and found"
+            );
+            assertNotEquals(MemorySegment.NULL, symbolOpt.get());
+        }
+    }
+
+    /**
+     * POC 2: netbridge_get_api bootstrap 调用与 NbApiV1 函数表解析与版本协商。
+     */
+    @Test
+    void testPoc2GetApiBootstrap() throws Throwable {
+        try (var arena = Arena.ofShared()) {
+            var lookup = SymbolLookup.libraryLookup(nativeLibPath, arena);
+            var symbol = lookup.find("netbridge_get_api").orElseThrow();
+            var linker = Linker.nativeLinker();
+            var getApiHandle = linker.downcallHandle(
+                    symbol,
+                    FfmApiLayouts.GET_API_DESC
+            );
+
+            // 1. 协商成功
+            var tablePtr = arena.allocate(ValueLayout.ADDRESS);
+            var status = (int) getApiHandle.invokeExact(1, 0, tablePtr);
+            assertEquals(FfmStatus.NB_OK, status);
+
+            var tableAddr = tablePtr.get(ValueLayout.ADDRESS, 0);
+            assertNotEquals(MemorySegment.NULL, tableAddr);
+
+            var tableSegment = tableAddr.reinterpret(
+                    FfmApiLayouts.API_V1.byteSize(),
+                    arena,
+                    null
+            );
+            var api = FfmApiV1.fromSegment(tableSegment);
+            assertEquals(1, api.abiMajor());
+            assertEquals(0, api.abiMinor());
+            assertEquals(184, api.structSize());
+
+            assertNotNull(api.contextCreate());
+            assertNotNull(api.connect());
+            assertNotNull(api.connectionWrite());
+            assertNotNull(api.connectionRead());
+            assertNotNull(api.serverStart());
+
+            // 2. 协商失败（Major 不匹配）
+            var badPtr = arena.allocate(ValueLayout.ADDRESS);
+            var badMajorStatus = (int) getApiHandle.invokeExact(2, 0, badPtr);
+            assertEquals(FfmStatus.NB_ABI_MISMATCH, badMajorStatus);
+
+            // 3. 协商失败（Minor 过高）
+            var badMinorStatus = (int) getApiHandle.invokeExact(1, 99, badPtr);
+            assertEquals(FfmStatus.NB_ABI_MISMATCH, badMinorStatus);
+        }
+    }
+
+    /**
+     * POC 3: 堆外 direct ByteBuffer / MemorySegment 数据面零中间层单次拷贝读写往返。
+     */
+    @Test
+    void testPoc3MemorySegmentReadWriteRoundtrip() throws Exception {
+        try (
+                var lib = FfmNativeLibrary.load(nativeLibPath);
+                var ctx = lib.createContext(2)
+        ) {
+
+            var acceptedConnLatch = new CountDownLatch(1);
+            var serverConnHolder = new long[1];
+
+            lib.dispatcher().addListener(event -> {
+                if (event.eventKind() == NativeEvent.KIND_ACCEPTED) {
+                    serverConnHolder[0] = event.arg0();
+                    acceptedConnLatch.countDown();
+                }
+            });
+
+            var serverId = ctx.serverStart(
+                    1,
+                    null,
+                    0,
+                    64,
+                    0
+            );
+            var port = ctx.serverPort(serverId);
+            assertTrue(port > 0);
+
+            var clientId = ctx.connect(
+                    1,
+                    "127.0.0.1",
+                    port,
+                    0
+            );
+            assertTrue(clientId > 0);
+
+            // 等待连接就绪和服务端收到 accept
+            var deadline = Instant.now().plus(Duration.ofSeconds(5));
+            while (Instant.now().isBefore(deadline)) {
+                if (ctx.connectionState(clientId) == 2) { // NB_CONNECTION_CONNECTED = 2
+                    break;
+                }
+                Thread.sleep(10);
+            }
+            assertEquals(2, ctx.connectionState(clientId));
+
+            assertTrue(
+                    acceptedConnLatch.await(5, TimeUnit.SECONDS),
+                    "Server should accept incoming connection"
+            );
+            var serverConnId = serverConnHolder[0];
+            assertTrue(serverConnId > 0);
+
+            // 1. Client -> Server 数据传输
+            var clientMsg = "Hello server via Java 25 MemorySegment!".getBytes(StandardCharsets.UTF_8);
+            try (var arena = Arena.ofConfined()) {
+                var srcSeg = arena.allocateFrom(
+                        ValueLayout.JAVA_BYTE,
+                        clientMsg
+                );
+                var written = ctx.connectionWrite(
+                        clientId,
+                        srcSeg,
+                        clientMsg.length
+                );
+                assertEquals(clientMsg.length, written);
+
+                var dstSeg = arena.allocate(clientMsg.length);
+                var totalRead = 0;
+                var readDeadline = Instant.now().plus(Duration.ofSeconds(5));
+                while (Instant.now().isBefore(readDeadline) && totalRead < clientMsg.length) {
+                    var n = ctx.connectionRead(
+                            serverConnId,
+                            dstSeg,
+                            clientMsg.length
+                    );
+                    if (n > 0) {
+                        totalRead += n;
+                    } else {
+                        Thread.sleep(10);
+                    }
+                }
+                assertEquals(clientMsg.length, totalRead);
+                var readBytes = dstSeg.toArray(ValueLayout.JAVA_BYTE);
+                assertArrayEquals(clientMsg, readBytes);
+            }
+
+            // 2. Server -> Client 数据回传
+            var serverReply = "Pong from server via MemorySegment!".getBytes(StandardCharsets.UTF_8);
+            try (var arena = Arena.ofConfined()) {
+                var replySeg = arena.allocateFrom(
+                        ValueLayout.JAVA_BYTE,
+                        serverReply
+                );
+                var written = ctx.connectionWrite(
+                        serverConnId,
+                        replySeg,
+                        serverReply.length
+                );
+                assertEquals(serverReply.length, written);
+
+                var clientDstSeg = arena.allocate(serverReply.length);
+                var totalClientRead = 0;
+                var readDeadline = Instant.now().plus(Duration.ofSeconds(5));
+                while (Instant.now().isBefore(readDeadline)
+                        && totalClientRead < serverReply.length
+                ) {
+                    var n = ctx.connectionRead(
+                            clientId,
+                            clientDstSeg,
+                            serverReply.length
+                    );
+                    if (n > 0) {
+                        totalClientRead += n;
+                    } else {
+                        Thread.sleep(10);
+                    }
+                }
+                assertEquals(serverReply.length, totalClientRead);
+                var clientReadBytes = clientDstSeg.toArray(ValueLayout.JAVA_BYTE);
+                assertArrayEquals(serverReply, clientReadBytes);
+            }
+
+            ctx.connectionClose(clientId);
+            ctx.connectionClose(serverConnId);
+            ctx.serverStop(serverId);
+        }
+    }
+
+    /**
+     * POC 4: Rust Tokio worker 线程 -> C Callback -> FFM Upcall Stub -> Java NativeEventDispatcher
+     * 分发。
+     */
+    @Test
+    void testPoc4RustTokioThreadUpcallToDispatcher() throws Exception {
+        try (
+                var lib = FfmNativeLibrary.load(nativeLibPath);
+                var ctx = lib.createContext(2)
+        ) {
+
+            var receivedEvents = new CopyOnWriteArrayList<NativeEvent>();
+            var eventLatch = new CountDownLatch(1);
+
+            lib.dispatcher().addListener(event -> {
+                receivedEvents.add(event);
+                if (event.eventKind() == NativeEvent.KIND_ACCEPTED
+                        || event.eventKind() == NativeEvent.KIND_CONNECTION_STATE) {
+                    eventLatch.countDown();
+                }
+            });
+
+            var serverId = ctx.serverStart(
+                    1,
+                    null,
+                    0,
+                    64,
+                    0
+            );
+            var port = ctx.serverPort(serverId);
+
+            var clientId = ctx.connect(
+                    1,
+                    "127.0.0.1",
+                    port,
+                    0
+            );
+
+            var received = eventLatch.await(5, TimeUnit.SECONDS);
+            assertTrue(
+                    received,
+                    "Should receive event from Rust Tokio worker thread via FFM upcall stub"
+            );
+            assertFalse(receivedEvents.isEmpty());
+
+            ctx.connectionClose(clientId);
+            ctx.serverStop(serverId);
+        }
+    }
+
+    /**
+     * 验证 Context 完整生命周期（创建、建连、优雅 shutdown、destroy）。
+     */
+    @Test
+    void testContextLifecycleAndShutdown() {
+        try (var lib = FfmNativeLibrary.load(nativeLibPath)) {
+            var ctx = lib.createContext(2);
+            var serverId = ctx.serverStart(
+                    1,
+                    null,
+                    0,
+                    32,
+                    0
+            );
+            var port = ctx.serverPort(serverId);
+            var _ = ctx.connect(
+                    1,
+                    "127.0.0.1",
+                    port,
+                    0
+            );
+
+            ctx.shutdown(1000);
+            ctx.destroy();
+
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> ctx.connect(
+                            1,
+                            "127.0.0.1",
+                            port,
+                            0
+                    )
+            );
+        }
+    }
+
+}

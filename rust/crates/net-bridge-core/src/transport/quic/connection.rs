@@ -6,12 +6,41 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
+use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE, get_event_sink};
 use crate::registry::remove_conn;
 use crate::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded};
 
-/// 单连接读写循环：读侧推入 Java 队列，写侧消费 Java 命令。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
+    conn_id: u64,
+    conn: quinn::Connection,
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    to_transport_rx: mpsc::Receiver<Command>,
+    to_java_tx: mpsc::Sender<Bytes>,
+    to_transport_tx: mpsc::Sender<Command>,
+    state: Arc<AtomicU32>,
+) {
+    run_connection_with_sink(
+        conn_id,
+        conn,
+        send,
+        recv,
+        to_transport_rx,
+        to_java_tx,
+        to_transport_tx,
+        state,
+        get_event_sink().clone(),
+        Box::new(|id| {
+            remove_conn(id);
+        }),
+    )
+    .await;
+}
+
+/// 单连接读写循环：读侧推入 Java 队列，写侧消费 Java 命令。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_connection_with_sink(
     conn_id: u64,
     conn: quinn::Connection,
     mut send: quinn::SendStream,
@@ -20,10 +49,13 @@ pub async fn run_connection(
     to_java_tx: mpsc::Sender<Bytes>,
     to_transport_tx: mpsc::Sender<Command>,
     state: Arc<AtomicU32>,
+    event_sink: Arc<dyn EventSink>,
+    cleanup: Box<dyn Fn(u64) + Send + Sync>,
 ) {
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<()>(1);
     let reader = {
         let to_transport_tx = to_transport_tx.clone();
+        let sink = Arc::clone(&event_sink);
         tokio::spawn(async move {
             let panicked = guarded("quic reader task", async move {
                 let mut empty_streak = 0u32;
@@ -41,7 +73,7 @@ pub async fn run_connection(
                             if to_java_tx.send(chunk.bytes).await.is_err() {
                                 break;
                             }
-                            crate::event::notify_data(conn_id);
+                            sink.on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
                         }
                         Ok(None) => break,
                         Err(_) => break,
@@ -66,6 +98,12 @@ pub async fn run_connection(
                 Some(Command::Write(bytes)) => {
                     if send.write_all(&bytes).await.is_err() {
                         state.store(STATE_FAILED, Ordering::SeqCst);
+                        event_sink.on_event(
+                            NB_EVENT_CONNECTION_STATE,
+                            conn_id,
+                            STATE_FAILED as i64,
+                            0,
+                        );
                         break;
                     }
                 }
@@ -82,10 +120,11 @@ pub async fn run_connection(
     match state.load(Ordering::SeqCst) {
         STATE_CONNECTING | STATE_CONNECTED => {
             state.store(STATE_CLOSED, Ordering::SeqCst);
+            event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_CLOSED as i64, 0);
         }
         _ => {}
     }
     reader.abort();
     conn.close(0u32.into(), b"net-bridge close");
-    remove_conn(conn_id);
+    cleanup(conn_id);
 }

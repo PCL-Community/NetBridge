@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
 use super::fec_stream::FecStream;
+use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE, get_event_sink};
 use crate::registry::{remove_conn, report_error};
 use crate::{Command, STATE_CLOSED, STATE_FAILED, guarded};
 
@@ -30,10 +31,47 @@ pub async fn run_kcp_connection(
     state: Arc<AtomicU32>,
     client_side: bool,
 ) {
-    let Some(session) = create_session(conn_id, fec, client_side, &state).await else {
+    run_kcp_connection_with_sink(
+        conn_id,
+        fec,
+        to_kcp_rx,
+        to_java_tx,
+        state,
+        client_side,
+        get_event_sink().clone(),
+        Box::new(|id| {
+            remove_conn(id);
+        }),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_kcp_connection_with_sink(
+    conn_id: u64,
+    fec: KcpFec,
+    to_kcp_rx: mpsc::Receiver<Command>,
+    to_java_tx: mpsc::Sender<Bytes>,
+    state: Arc<AtomicU32>,
+    client_side: bool,
+    event_sink: Arc<dyn EventSink>,
+    cleanup: Box<dyn Fn(u64) + Send + Sync>,
+) {
+    let Some(session) =
+        create_session(conn_id, fec, client_side, &state, &event_sink, &cleanup).await
+    else {
         return;
     };
-    let Some(stream) = open_mc_stream(conn_id, &session, client_side, &state).await else {
+    let Some(stream) = open_mc_stream(
+        conn_id,
+        &session,
+        client_side,
+        &state,
+        &event_sink,
+        &cleanup,
+    )
+    .await
+    else {
         return;
     };
 
@@ -41,9 +79,18 @@ pub async fn run_kcp_connection(
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
     let done_guard = reader_done_tx.clone();
     let reader_state = state.clone();
+    let sink = Arc::clone(&event_sink);
     let reader = tokio::spawn(async move {
         let panicked = guarded("kcp reader task", async move {
-            reader_loop(conn_id, stream_r, to_java_tx, reader_state, reader_done_tx).await;
+            reader_loop(
+                conn_id,
+                stream_r,
+                to_java_tx,
+                reader_state,
+                reader_done_tx,
+                sink,
+            )
+            .await;
         })
         .await;
         if panicked {
@@ -58,11 +105,12 @@ pub async fn run_kcp_connection(
         to_kcp_rx,
         &mut reader_done_rx,
         &state,
+        &event_sink,
     )
     .await;
 
     reader.abort();
-    remove_conn(conn_id);
+    cleanup(conn_id);
 }
 
 async fn create_session(
@@ -70,11 +118,13 @@ async fn create_session(
     fec: KcpFec,
     client_side: bool,
     state: &AtomicU32,
+    event_sink: &Arc<dyn EventSink>,
+    cleanup: &(dyn Fn(u64) + Send + Sync),
 ) -> Option<Session> {
     let config = match smux_config() {
         Ok(config) => config,
         Err(msg) => {
-            return request_fail(conn_id, state, Err(msg));
+            return request_fail(conn_id, state, Err(msg), event_sink, cleanup);
         }
     };
     let result = if client_side {
@@ -86,6 +136,8 @@ async fn create_session(
         conn_id,
         state,
         result.map_err(|e| format!("smux session setup failed: {e}")),
+        event_sink,
+        cleanup,
     )
 }
 
@@ -94,6 +146,8 @@ async fn open_mc_stream(
     session: &Session,
     client_side: bool,
     state: &AtomicU32,
+    event_sink: &Arc<dyn EventSink>,
+    cleanup: &(dyn Fn(u64) + Send + Sync),
 ) -> Option<smux::Stream> {
     let result = if client_side {
         session.open_stream().await
@@ -104,16 +158,25 @@ async fn open_mc_stream(
         conn_id,
         state,
         result.map_err(|e| format!("smux stream setup failed: {e}")),
+        event_sink,
+        cleanup,
     )
 }
 
-fn request_fail<T>(conn_id: u64, state: &AtomicU32, result: Result<T, String>) -> Option<T> {
+fn request_fail<T>(
+    conn_id: u64,
+    state: &AtomicU32,
+    result: Result<T, String>,
+    event_sink: &Arc<dyn EventSink>,
+    cleanup: &(dyn Fn(u64) + Send + Sync),
+) -> Option<T> {
     match result {
         Ok(value) => Some(value),
         Err(msg) => {
             report_error(format!("kcp conn {conn_id}: {msg}"));
             state.store(STATE_FAILED, Ordering::SeqCst);
-            remove_conn(conn_id);
+            event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_FAILED as i64, 0);
+            cleanup(conn_id);
             None
         }
     }
@@ -125,6 +188,7 @@ async fn reader_loop(
     to_java_tx: mpsc::Sender<Bytes>,
     state: Arc<AtomicU32>,
     done_tx: mpsc::Sender<bool>,
+    event_sink: Arc<dyn EventSink>,
 ) {
     let mut payload = BytesMut::with_capacity(64 * 1024);
     let clean = loop {
@@ -135,7 +199,7 @@ async fn reader_loop(
                 if to_java_tx.send(payload.split().freeze()).await.is_err() {
                     break true;
                 }
-                crate::event::notify_data(conn_id);
+                event_sink.on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
             }
             Err(_) if state.load(Ordering::SeqCst) == STATE_CLOSED => break true,
             Err(e) if is_session_closed(&e) => break true,
@@ -155,6 +219,7 @@ async fn drive(
     mut cmds: mpsc::Receiver<Command>,
     reader_done: &mut mpsc::Receiver<bool>,
     state: &AtomicU32,
+    event_sink: &Arc<dyn EventSink>,
 ) {
     loop {
         if state.load(Ordering::SeqCst) == STATE_CLOSED {
@@ -166,6 +231,7 @@ async fn drive(
             done = reader_done.recv() => {
                 if done == Some(false) {
                     state.store(STATE_FAILED, Ordering::SeqCst);
+                    event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_FAILED as i64, 0);
                 }
                 break;
             }
@@ -178,6 +244,7 @@ async fn drive(
                             } else {
                                 report_error(format!("kcp conn {conn_id}: write error: {e}"));
                                 state.store(STATE_FAILED, Ordering::SeqCst);
+                                event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_FAILED as i64, 0);
                                 true
                             }
                         } else {
@@ -195,6 +262,7 @@ async fn drive(
     }
     if state.load(Ordering::SeqCst) != STATE_FAILED {
         state.store(STATE_CLOSED, Ordering::SeqCst);
+        event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_CLOSED as i64, 0);
     }
     graceful_close(&mut stream_w, session).await;
 }
