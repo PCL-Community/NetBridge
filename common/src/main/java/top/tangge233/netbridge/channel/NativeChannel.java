@@ -2,7 +2,6 @@ package top.tangge233.netbridge.channel;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
-import io.netty.util.concurrent.FastThreadLocal;
 import io.netty.util.concurrent.ScheduledFuture;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
@@ -31,13 +30,6 @@ public class NativeChannel extends AbstractChannel {
     private static final int MAX_READS_PER_POLL = 16;
     private static final int MAX_DRAIN_ROUNDS = 4;
     private static final long BACKPRESSURE_RETRY_MILLIS = 50L;
-
-    private static final FastThreadLocal<byte[]> WRITE_SCRATCH = new FastThreadLocal<>() {
-        @Override
-        protected byte[] initialValue() {
-            return new byte[8192];
-        }
-    };
 
     private final NativeConnection connection;
     private final ChannelConfig config = new DefaultChannelConfig(this);
@@ -247,28 +239,36 @@ public class NativeChannel extends AbstractChannel {
         backpressureRetry = retry;
     }
 
-    private NativeIoResult writeChunk(ByteBuf buf, int take) {
+    private NativeIoResult writeChunk(
+            ByteBuf buf,
+            int take
+    ) {
         var index = buf.readerIndex();
-        var nio = buf.nioBufferCount() == 1
-                ? buf.nioBuffer(index, take)
-                : null;
-        if (nio != null && nio.isDirect()) {
-            var res = connection.write(nio);
-            if (res.progressed() && res.bytes() > 0) {
-                buf.skipBytes(res.bytes());
-            }
-
-            return res;
+        if (buf.nioBufferCount() == 1) {
+            return writeNio(
+                    buf,
+                    buf.nioBuffer(index, take)
+            );
         }
 
-        var scratch = WRITE_SCRATCH.get();
-        if (scratch.length < take) {
-            scratch = new byte[Math.max(take, scratch.length << 1)];
-            WRITE_SCRATCH.set(scratch);
+        var scratch = alloc().ioBuffer(take, take);
+        try {
+            buf.getBytes(
+                    index,
+                    scratch,
+                    take
+            );
+            return writeNio(
+                    buf,
+                    scratch.nioBuffer(0, take)
+            );
+        } finally {
+            scratch.release();
         }
-        buf.getBytes(index, scratch, 0, take);
-        var heap = ByteBuffer.wrap(scratch, 0, take);
-        var res = connection.write(heap);
+    }
+
+    private NativeIoResult writeNio(ByteBuf buf, ByteBuffer nio) {
+        var res = connection.write(nio);
         if (res.progressed() && res.bytes() > 0) {
             buf.skipBytes(res.bytes());
         }

@@ -13,15 +13,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.transport.TransportMode;
 
-/**
- * 多人游戏屏幕左上角「传输」循环按钮（TCP/QUIC/KCP 三档），切换即写回 client.toml；tooltip 说明自动降级策略。
- *
- * <p>mixin 继承目标类的父类 Screen，即可在注入方法内以 this 调用
- * protected 的 addRenderableWidget。
- *
- * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
- * 修改时必须同步两处。
- */
 @Mixin(JoinMultiplayerScreen.class)
 public abstract class JoinMultiplayerScreenMixin extends Screen {
 
@@ -52,7 +43,7 @@ public abstract class JoinMultiplayerScreenMixin extends Screen {
                                 110,
                                 20,
                                 Component.translatable("netbridge.transport.mode"),
-                                (btn, mode) ->
+                                (_, mode) ->
                                         NetBridgeServices.clientSettings().updateMode(mode)
                         );
         button.setTooltip(Tooltip.create(

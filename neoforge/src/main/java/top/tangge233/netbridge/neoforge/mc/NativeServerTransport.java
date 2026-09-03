@@ -31,10 +31,7 @@ public final class NativeServerTransport {
         }
 
         var pipeline = channel.pipeline();
-        pipeline.addLast(
-                "timeout",
-                new ReadTimeoutHandler(30)
-        );
+        pipeline.addLast("timeout", new ReadTimeoutHandler(30));
 
         Connection.configureSerialization(
                 pipeline,
