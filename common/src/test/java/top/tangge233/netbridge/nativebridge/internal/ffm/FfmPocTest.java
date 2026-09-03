@@ -159,7 +159,7 @@ class FfmPocTest {
                         srcSeg,
                         clientMsg.length
                 );
-                assertEquals(clientMsg.length, written);
+                assertEquals(clientMsg.length, written.bytes());
 
                 var dstSeg = arena.allocate(clientMsg.length);
                 var totalRead = 0;
@@ -170,8 +170,8 @@ class FfmPocTest {
                             dstSeg,
                             clientMsg.length
                     );
-                    if (n > 0) {
-                        totalRead += n;
+                    if (n.bytes() > 0) {
+                        totalRead += n.bytes();
                     } else {
                         Thread.sleep(10);
                     }
@@ -193,7 +193,7 @@ class FfmPocTest {
                         replySeg,
                         serverReply.length
                 );
-                assertEquals(serverReply.length, written);
+                assertEquals(serverReply.length, written.bytes());
 
                 var clientDstSeg = arena.allocate(serverReply.length);
                 var totalClientRead = 0;
@@ -206,8 +206,8 @@ class FfmPocTest {
                             clientDstSeg,
                             serverReply.length
                     );
-                    if (n > 0) {
-                        totalClientRead += n;
+                    if (n.bytes() > 0) {
+                        totalClientRead += n.bytes();
                     } else {
                         Thread.sleep(10);
                     }

@@ -101,7 +101,7 @@ pub async fn run_connection_with_sink(
                         event_sink.on_event(
                             NB_EVENT_CONNECTION_STATE,
                             conn_id,
-                            STATE_FAILED as i64,
+                            crate::event::abi_connection_state(STATE_FAILED) as i64,
                             0,
                         );
                         break;
@@ -120,7 +120,12 @@ pub async fn run_connection_with_sink(
     match state.load(Ordering::SeqCst) {
         STATE_CONNECTING | STATE_CONNECTED => {
             state.store(STATE_CLOSED, Ordering::SeqCst);
-            event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_CLOSED as i64, 0);
+            event_sink.on_event(
+                NB_EVENT_CONNECTION_STATE,
+                conn_id,
+                crate::event::abi_connection_state(STATE_CLOSED) as i64,
+                0,
+            );
         }
         _ => {}
     }

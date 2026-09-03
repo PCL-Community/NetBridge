@@ -1,0 +1,209 @@
+package top.tangge233.netbridge.nativebridge.fake;
+
+import org.junit.jupiter.api.Test;
+import top.tangge233.netbridge.nativebridge.*;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.jspecify.annotations.Nullable;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * 纯 JVM fake backend 行为测试：accept 事件、状态 reconcile、data 事件、 WOULD_BLOCK/WRITABLE、close。
+ */
+class FakeNativeTransportBackendTest {
+
+    @Test
+    void connectDeliversAcceptedAndConnected() throws Exception {
+        try (var backend = new FakeNativeTransportBackend()) {
+            var server = backend.startServer(NativeServerRequest.quic(
+                    25565,
+                    64
+            ));
+            assertEquals(25565, server.localPort());
+
+            var acceptedLatch = new CountDownLatch(1);
+            var acceptedRef = new AtomicReference<@Nullable NativeConnection>();
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(NativeConnection connection) {
+                    acceptedRef.set(connection);
+                    acceptedLatch.countDown();
+                }
+            });
+
+            var client = backend.connect(NativeConnectRequest.quic(
+                    "127.0.0.1",
+                    25565
+            ));
+            assertEquals(
+                    NativeConnectionState.CONNECTED,
+                    client.state(),
+                    "fake handshake completes synchronously"
+            );
+
+            var connectedLatch = new CountDownLatch(1);
+            client.setListener(new NativeConnectionListener() {
+                @Override
+                public void onStateChanged(NativeConnectionState state) {
+                    if (state == NativeConnectionState.CONNECTED) {
+                        connectedLatch.countDown();
+                    }
+                }
+            });
+            assertTrue(
+                    connectedLatch.await(1, TimeUnit.SECONDS),
+                    "listener attach reconcile should report CONNECTED"
+            );
+            assertTrue(
+                    acceptedLatch.await(1, TimeUnit.SECONDS),
+                    "server should receive accepted connection"
+            );
+            assertEquals(
+                    NativeConnectionState.CONNECTED,
+                    acceptedRef.get().state()
+            );
+        }
+    }
+
+    @Test
+    void writeReadEcho() throws Exception {
+        try (var backend = new FakeNativeTransportBackend()) {
+            var server = backend.startServer(NativeServerRequest.quic(
+                    25566,
+                    64
+            ));
+            var acceptedLatch = new CountDownLatch(1);
+            var acceptedRef = new AtomicReference<@Nullable NativeConnection>();
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(NativeConnection connection) {
+                    acceptedRef.set(connection);
+                    acceptedLatch.countDown();
+                }
+            });
+            var client = backend.connect(NativeConnectRequest.quic(
+                    "127.0.0.1",
+                    25566
+            ));
+            client.setListener(new NativeConnectionListener() {
+            });
+            assertTrue(acceptedLatch.await(1, TimeUnit.SECONDS));
+            var serverConn = acceptedRef.get();
+
+            var dataAvailable = new CountDownLatch(1);
+            serverConn.setListener(new NativeConnectionListener() {
+                @Override
+                public void onDataAvailable() {
+                    dataAvailable.countDown();
+                }
+            });
+
+            var msg = "fake roundtrip payload".getBytes(StandardCharsets.UTF_8);
+            var write = client.write(ByteBuffer.wrap(msg));
+            assertEquals(
+                    NativeIoResult.progressed(msg.length),
+                    write
+            );
+            assertTrue(
+                    dataAvailable.await(1, TimeUnit.SECONDS),
+                    "DATA_AVAILABLE event expected"
+            );
+
+            var readBuf = ByteBuffer.allocate(1024);
+            var read = serverConn.read(readBuf);
+            assertTrue(read.progressed());
+            assertEquals(msg.length, read.bytes());
+            readBuf.flip();
+            var got = new byte[read.bytes()];
+            readBuf.get(got);
+            assertArrayEquals(msg, got);
+        }
+    }
+
+    @Test
+    void wouldBlockThenWritableAfterPeerDrain() throws Exception {
+        try (var backend = new FakeNativeTransportBackend()) {
+            var server = backend.startServer(NativeServerRequest.quic(
+                    25567,
+                    64
+            ));
+            var acceptedLatch = new CountDownLatch(1);
+            var acceptedRef = new AtomicReference<@Nullable NativeConnection>();
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(NativeConnection connection) {
+                    acceptedRef.set(connection);
+                    acceptedLatch.countDown();
+                }
+            });
+            var client = backend.connect(NativeConnectRequest.quic(
+                    "127.0.0.1",
+                    25567
+            ));
+            client.setListener(new NativeConnectionListener() {
+            });
+            assertTrue(acceptedLatch.await(1, TimeUnit.SECONDS));
+            var serverConn = acceptedRef.get();
+
+            var fakeClient = (FakeNativeConnection) client;
+            fakeClient.setOutboundCapacity(8);
+            var small = client.write(ByteBuffer.wrap(new byte[6]));
+            assertEquals(NativeIoResult.progressed(6), small);
+
+            var big = new byte[100];
+            var src = ByteBuffer.wrap(big);
+            var first = client.write(src);
+            assertEquals(NativeIoResult.WOULD_BLOCK, first);
+            assertEquals(0, src.position(), "WOULD_BLOCK 不得消费输入");
+            assertTrue(fakeClient.writerBlocked());
+
+            // 对端 drain 后，写侧收到 WRITABLE
+            var writableLatch = new CountDownLatch(1);
+            client.setListener(new NativeConnectionListener() {
+                @Override
+                public void onWritable() {
+                    writableLatch.countDown();
+                }
+            });
+            var drain = ByteBuffer.allocate(1024);
+            var drained = serverConn.read(drain);
+            assertTrue(drained.progressed());
+            assertTrue(
+                    writableLatch.await(1, TimeUnit.SECONDS),
+                    "WRITABLE event expected after peer drains"
+            );
+
+            // 提容量后再写应成功
+            fakeClient.setOutboundCapacity(1024);
+            var second = client.write(ByteBuffer.wrap(big));
+            assertEquals(NativeIoResult.progressed(big.length), second);
+        }
+    }
+
+    @Test
+    void backendCloseClosesEverything() {
+        var backend = new FakeNativeTransportBackend();
+        var closed = new CountDownLatch(1);
+        backend.addCloseHook(closed::countDown);
+        backend.startServer(NativeServerRequest.quic(25568, 64));
+        backend.connect(NativeConnectRequest.quic("127.0.0.1", 25568));
+
+        backend.close();
+        assertEquals(
+                0,
+                closed.getCount(),
+                "close hooks should run"
+        );
+        assertThrows(
+                NativeException.class,
+                () -> backend.connect(NativeConnectRequest.quic("127.0.0.1", 25568))
+        );
+    }
+
+}

@@ -39,3 +39,8 @@ pub fn get_event_sink() -> &'static Arc<dyn EventSink> {
 pub fn notify_data(conn_id: u64) {
     get_event_sink().on_event(NB_EVENT_DATA_AVAILABLE, conn_id, 0, 0);
 }
+
+/// 把 core 内部连接状态常量（0=CONNECTING..3=FAILED）映射为 ABI 状态值（1..4）。
+pub fn abi_connection_state(internal: u32) -> u32 {
+    internal + 1
+}

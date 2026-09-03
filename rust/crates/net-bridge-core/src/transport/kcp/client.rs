@@ -90,7 +90,7 @@ pub fn connect_in_context(
                 ctx_clone.event_sink().on_event(
                     crate::event::NB_EVENT_CONNECTION_STATE,
                     conn_id,
-                    STATE_CONNECTED as i64,
+                    crate::event::abi_connection_state(STATE_CONNECTED) as i64,
                     0,
                 );
             }

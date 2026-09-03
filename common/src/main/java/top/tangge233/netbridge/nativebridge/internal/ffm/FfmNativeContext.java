@@ -9,9 +9,6 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import org.jspecify.annotations.Nullable;
 
-/**
- * 封装原生 nb_context_t 指针与操作的上下文对象。
- */
 public final class FfmNativeContext implements AutoCloseable {
 
     private final FfmApiV1 api;
@@ -186,7 +183,7 @@ public final class FfmNativeContext implements AutoCloseable {
         }
     }
 
-    public int connectionWrite(
+    public FfmIoResult connectionWrite(
             long connectionId,
             MemorySegment data,
             int length
@@ -194,6 +191,7 @@ public final class FfmNativeContext implements AutoCloseable {
         ensureOpen();
         try (var arena = Arena.ofConfined()) {
             var outWritten = arena.allocate(ValueLayout.JAVA_INT);
+
             var status = (int) api.connectionWrite().invokeExact(
                     contextPtr,
                     connectionId,
@@ -201,8 +199,25 @@ public final class FfmNativeContext implements AutoCloseable {
                     length,
                     outWritten
             );
-            FfmStatus.checkStatus(status, "connection_write");
-            return outWritten.get(ValueLayout.JAVA_INT, 0);
+
+            var written = outWritten.get(ValueLayout.JAVA_INT, 0);
+
+            switch (status) {
+                case FfmStatus.NB_CLOSED,
+                     FfmStatus.NB_NOT_FOUND,
+                     FfmStatus.NB_INVALID_ARGUMENT -> {
+                    return new FfmIoResult(status, 0);
+                }
+
+                case FfmStatus.NB_OK,
+                     FfmStatus.NB_WOULD_BLOCK -> {
+                    return new FfmIoResult(status, written);
+                }
+
+                default -> throw new IllegalStateException(
+                        "connection_write failed: " + FfmStatus.describe(status)
+                );
+            }
         } catch (Throwable t) {
             if (t instanceof RuntimeException re) {
                 throw re;
@@ -211,7 +226,7 @@ public final class FfmNativeContext implements AutoCloseable {
         }
     }
 
-    public int connectionRead(
+    public FfmIoResult connectionRead(
             long connectionId,
             MemorySegment dst,
             int capacity
@@ -219,6 +234,7 @@ public final class FfmNativeContext implements AutoCloseable {
         ensureOpen();
         try (var arena = Arena.ofConfined()) {
             var outRead = arena.allocate(ValueLayout.JAVA_INT);
+
             var status = (int) api.connectionRead().invokeExact(
                     contextPtr,
                     connectionId,
@@ -226,8 +242,24 @@ public final class FfmNativeContext implements AutoCloseable {
                     capacity,
                     outRead
             );
-            FfmStatus.checkStatus(status, "connection_read");
-            return outRead.get(ValueLayout.JAVA_INT, 0);
+            var read = outRead.get(ValueLayout.JAVA_INT, 0);
+
+            switch (status) {
+                case FfmStatus.NB_CLOSED,
+                     FfmStatus.NB_NOT_FOUND,
+                     FfmStatus.NB_INVALID_ARGUMENT -> {
+                    return new FfmIoResult(status, 0);
+                }
+
+                case FfmStatus.NB_OK,
+                     FfmStatus.NB_WOULD_BLOCK -> {
+                    return new FfmIoResult(status, read);
+                }
+
+                default -> throw new IllegalStateException(
+                        "connection_read failed: " + FfmStatus.describe(status)
+                );
+            }
         } catch (Throwable t) {
             if (t instanceof RuntimeException re) {
                 throw re;

@@ -175,7 +175,12 @@ fn request_fail<T>(
         Err(msg) => {
             report_error(format!("kcp conn {conn_id}: {msg}"));
             state.store(STATE_FAILED, Ordering::SeqCst);
-            event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_FAILED as i64, 0);
+            event_sink.on_event(
+                NB_EVENT_CONNECTION_STATE,
+                conn_id,
+                crate::event::abi_connection_state(STATE_FAILED) as i64,
+                0,
+            );
             cleanup(conn_id);
             None
         }
@@ -231,7 +236,12 @@ async fn drive(
             done = reader_done.recv() => {
                 if done == Some(false) {
                     state.store(STATE_FAILED, Ordering::SeqCst);
-                    event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_FAILED as i64, 0);
+                    event_sink.on_event(
+                        NB_EVENT_CONNECTION_STATE,
+                        conn_id,
+                        crate::event::abi_connection_state(STATE_FAILED) as i64,
+                        0,
+                    );
                 }
                 break;
             }
@@ -244,7 +254,12 @@ async fn drive(
                             } else {
                                 report_error(format!("kcp conn {conn_id}: write error: {e}"));
                                 state.store(STATE_FAILED, Ordering::SeqCst);
-                                event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_FAILED as i64, 0);
+                                event_sink.on_event(
+                                    NB_EVENT_CONNECTION_STATE,
+                                    conn_id,
+                                    crate::event::abi_connection_state(STATE_FAILED) as i64,
+                                    0,
+                                );
                                 true
                             }
                         } else {
@@ -262,7 +277,12 @@ async fn drive(
     }
     if state.load(Ordering::SeqCst) != STATE_FAILED {
         state.store(STATE_CLOSED, Ordering::SeqCst);
-        event_sink.on_event(NB_EVENT_CONNECTION_STATE, conn_id, STATE_CLOSED as i64, 0);
+        event_sink.on_event(
+            NB_EVENT_CONNECTION_STATE,
+            conn_id,
+            crate::event::abi_connection_state(STATE_CLOSED) as i64,
+            0,
+        );
     }
     graceful_close(&mut stream_w, session).await;
 }
