@@ -11,6 +11,5 @@ path = "src/lib.rs"
 
 [dependencies]
 net-bridge-core = { path = "../net-bridge-core" }
-jni = "0.22"
 bytes = "1"
 

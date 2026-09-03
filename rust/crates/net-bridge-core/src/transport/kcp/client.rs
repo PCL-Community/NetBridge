@@ -74,6 +74,9 @@ pub fn connect_in_context(
     let host = host.to_string();
     let ctx_clone = Arc::clone(ctx);
     let ctx_cleanup = Arc::clone(ctx);
+    let connected_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ok_task = Arc::clone(&connected_ok);
+    let state_outer = Arc::clone(&state);
     ctx.handle().spawn(async move {
         let panicked = guarded("kcp connect task in context", async move {
             let Some(addr) = resolve_host(conn_id, &state, &host, port).await else {
@@ -85,6 +88,7 @@ pub fn connect_in_context(
             let Some(stream) = establish_kcp(conn_id, &state, addr, udp, profile).await else {
                 return;
             };
+            ok_task.store(true, Ordering::SeqCst);
             if state.load(Ordering::SeqCst) != STATE_CLOSED {
                 state.store(STATE_CONNECTED, Ordering::SeqCst);
                 ctx_clone.event_sink().on_event(
@@ -114,6 +118,18 @@ pub fn connect_in_context(
         .await;
         if panicked {
             ctx_cleanup.remove_conn(conn_id);
+        } else if !connected_ok.load(Ordering::SeqCst) {
+            let st = state_outer.load(Ordering::SeqCst);
+            ctx_cleanup.event_sink().on_event(
+                crate::event::NB_EVENT_CONNECTION_STATE,
+                conn_id,
+                crate::event::abi_connection_state(if st == STATE_FAILED {
+                    STATE_FAILED
+                } else {
+                    STATE_CLOSED
+                }) as i64,
+                0,
+            );
         }
     });
     Ok(conn_id)

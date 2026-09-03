@@ -7,13 +7,6 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * 基于 Java 25 FFM 的 NativeTransportBackend 实现。
- *
- * <p>拥有 FfmNativeLibrary（含 shared Arena / upcall stub）与 NativeContext。
- * 事件从 Rust Tokio worker 线程经 upcall 到达 {@link #onEvent(NativeEvent)}， 在此按 object id 路由到 typed
- * connection/server wrapper。
- */
 public final class FfmNativeTransportBackend
         implements NativeTransportBackend, NativeEventListener {
 
@@ -177,9 +170,6 @@ public final class FfmNativeTransportBackend
         servers.remove(serverId);
     }
 
-    /**
-     * 事件路由入口（在 Rust Tokio worker 线程上被 upcall 调用，必须轻量且不阻塞）。
-     */
     @Override
     public void onEvent(NativeEvent event) {
         if (state == NativeBackendState.CLOSED || state == NativeBackendState.CLOSING) {
@@ -222,7 +212,7 @@ public final class FfmNativeTransportBackend
                 case NativeEvent.KIND_SERVER_STATE -> {
                     var server = servers.get(event.objectId());
                     if (server != null) {
-                        server.handleStateChanged((int) event.arg0());
+                        server.handleStateChanged();
                     }
                 }
                 default -> {

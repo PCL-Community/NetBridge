@@ -1,7 +1,5 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
-import top.tangge233.netbridge.jni.NativeLoader;
-
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -20,10 +18,9 @@ public final class FfmTestSupport {
             }
         }
 
-        var libName = NativeLoader.nativeResourceName();
-        var platformDir = NativeLoader.platformDir();
+        var libName = NativeLibraryResolver.nativeResourceName();
+        var platformDir = NativeLibraryResolver.platformDir();
 
-        // 尝试常见构建产物路径
         var candidates = new Path[]{
                 Path.of("build/native", platformDir, libName),
                 Path.of("../build/native", platformDir, libName),

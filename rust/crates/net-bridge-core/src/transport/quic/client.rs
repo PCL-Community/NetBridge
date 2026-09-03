@@ -11,7 +11,9 @@ use super::connection::run_connection;
 use crate::error::{BridgeError, Transport};
 use crate::registry::{allocate_id, conns, remove_conn, report_error, runtime};
 use crate::socket_util;
-use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, guarded};
+use crate::{
+    Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded,
+};
 
 /// 客户端发起 QUIC 连接（异步握手，立即返回连接 id）。
 pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
@@ -104,6 +106,23 @@ pub fn connect_in_context(
                     },
                 )
                 .await;
+            } else {
+                let st = state.load(Ordering::SeqCst);
+                if st == STATE_FAILED {
+                    ctx_clone.event_sink().on_event(
+                        crate::event::NB_EVENT_CONNECTION_STATE,
+                        conn_id,
+                        crate::event::abi_connection_state(STATE_FAILED) as i64,
+                        0,
+                    );
+                } else if st == STATE_CLOSED {
+                    ctx_clone.event_sink().on_event(
+                        crate::event::NB_EVENT_CONNECTION_STATE,
+                        conn_id,
+                        crate::event::abi_connection_state(STATE_CLOSED) as i64,
+                        0,
+                    );
+                }
             }
         })
         .await;

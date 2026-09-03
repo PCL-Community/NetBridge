@@ -5,6 +5,7 @@ import top.tangge233.netbridge.nativebridge.*;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -13,9 +14,6 @@ import org.jspecify.annotations.Nullable;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * 纯 JVM fake backend 行为测试：accept 事件、状态 reconcile、data 事件、 WOULD_BLOCK/WRITABLE、close。
- */
 class FakeNativeTransportBackendTest {
 
     @Test
@@ -25,7 +23,10 @@ class FakeNativeTransportBackendTest {
                     25565,
                     64
             ));
-            assertEquals(25565, server.localPort());
+            assertEquals(
+                    25565,
+                    server.localPort()
+            );
 
             var acceptedLatch = new CountDownLatch(1);
             var acceptedRef = new AtomicReference<@Nullable NativeConnection>();
@@ -64,9 +65,10 @@ class FakeNativeTransportBackendTest {
                     acceptedLatch.await(1, TimeUnit.SECONDS),
                     "server should receive accepted connection"
             );
+            var accepted = Objects.requireNonNull(acceptedRef.get());
             assertEquals(
                     NativeConnectionState.CONNECTED,
-                    acceptedRef.get().state()
+                    accepted.state()
             );
         }
     }
@@ -94,7 +96,7 @@ class FakeNativeTransportBackendTest {
             client.setListener(new NativeConnectionListener() {
             });
             assertTrue(acceptedLatch.await(1, TimeUnit.SECONDS));
-            var serverConn = acceptedRef.get();
+            var serverConn = Objects.requireNonNull(acceptedRef.get());
 
             var dataAvailable = new CountDownLatch(1);
             serverConn.setListener(new NativeConnectionListener() {
@@ -149,7 +151,7 @@ class FakeNativeTransportBackendTest {
             client.setListener(new NativeConnectionListener() {
             });
             assertTrue(acceptedLatch.await(1, TimeUnit.SECONDS));
-            var serverConn = acceptedRef.get();
+            var serverConn = Objects.requireNonNull(acceptedRef.get());
 
             var fakeClient = (FakeNativeConnection) client;
             fakeClient.setOutboundCapacity(8);
@@ -163,7 +165,6 @@ class FakeNativeTransportBackendTest {
             assertEquals(0, src.position(), "WOULD_BLOCK 不得消费输入");
             assertTrue(fakeClient.writerBlocked());
 
-            // 对端 drain 后，写侧收到 WRITABLE
             var writableLatch = new CountDownLatch(1);
             client.setListener(new NativeConnectionListener() {
                 @Override
@@ -179,7 +180,6 @@ class FakeNativeTransportBackendTest {
                     "WRITABLE event expected after peer drains"
             );
 
-            // 提容量后再写应成功
             fakeClient.setOutboundCapacity(1024);
             var second = client.write(ByteBuffer.wrap(big));
             assertEquals(NativeIoResult.progressed(big.length), second);

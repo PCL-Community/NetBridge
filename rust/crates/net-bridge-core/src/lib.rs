@@ -41,7 +41,7 @@ pub enum Command {
     Close,
 }
 
-/// 连接状态（与 Java `NativeConnState` 一致）。
+/// 内部连接状态常量（core 内部值；对外暴露时经 `abi_connection_state` 映射为 ABI 值 1..4）。
 pub const STATE_CONNECTING: u32 = 0;
 pub const STATE_CONNECTED: u32 = 1;
 pub const STATE_CLOSED: u32 = 2;

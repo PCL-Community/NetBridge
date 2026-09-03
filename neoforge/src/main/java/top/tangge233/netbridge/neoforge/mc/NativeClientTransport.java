@@ -8,6 +8,9 @@ import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.PacketFlow;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.channel.NativeChannel;
+import top.tangge233.netbridge.nativebridge.NativeConnectRequest;
+import top.tangge233.netbridge.nativebridge.NativeTransportKind;
+import top.tangge233.netbridge.runtime.NetBridgeNative;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.transport.*;
 
@@ -27,6 +30,14 @@ public final class NativeClientTransport {
     ) {
         var pipelineAttached = new AtomicBoolean(false);
         ConnectionDisplay.clear();
+
+        if (!NetBridgeNative.available()) {
+            NetBridge.LOGGER.info(
+                    "Native transport unavailable for {}; using TCP",
+                    tcpAddress
+            );
+            return Connection.connect(tcpAddress, useEpoll, connection);
+        }
         Throwable last = null;
 
         for (var attempt = 1; attempt <= 2; attempt++) {
@@ -61,6 +72,7 @@ public final class NativeClientTransport {
             }
         }
 
+        //noinspection ConstantValue
         NetBridge.LOGGER.warn(
                 "Transport {} to {} failed twice ({}), falling back to TCP",
                 target.mode(),
@@ -84,13 +96,33 @@ public final class NativeClientTransport {
             InetSocketAddress endpoint,
             AtomicBoolean pipelineAttached
     ) {
-        var kcp = NetBridgeServices.clientSettings().current().mode() == TransportMode.KCP;
+        var backend = NetBridgeNative.backend();
+        if (backend == null) {
+            throw new IllegalStateException("native backend unavailable");
+        }
+
+        var settings = NetBridgeServices.clientSettings().current();
+        var kind = settings.mode() == TransportMode.KCP
+                ? NativeTransportKind.KCP
+                : NativeTransportKind.QUIC;
         EventLoopGroup group = useEpoll && Epoll.isAvailable()
                 ? Connection.NETWORK_EPOLL_WORKER_GROUP.get()
                 : Connection.NETWORK_WORKER_GROUP.get();
+
+        var profile = settings.kcpProfile() == KcpProfile.AGGRESSIVE
+                ? NativeConnectRequest.KcpProfileValue.AGGRESSIVE
+                : NativeConnectRequest.KcpProfileValue.BALANCED;
+        var request = new NativeConnectRequest(
+                kind,
+                endpoint.getHostString(),
+                endpoint.getPort(),
+                profile
+        );
+        var connectionHandle = backend.connect(request);
+        var channel = new NativeChannel(connectionHandle);
         var bootstrap = new Bootstrap()
                 .group(group)
-                .channelFactory(() -> new NativeChannel(kcp))
+                .channelFactory(() -> channel)
                 .handler(new ChannelInitializer<NativeChannel>() {
                     @Override
                     protected void initChannel(NativeChannel channel) {
@@ -122,7 +154,8 @@ public final class NativeClientTransport {
     private static void closeQuietly(Channel channel) {
         try {
             channel.close().syncUninterruptibly();
-        } catch (Throwable _) {
+        } catch (Throwable e) {
+            NetBridge.LOGGER.debug("Failed to close channel quietly", e);
         }
     }
 

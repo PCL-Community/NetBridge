@@ -8,15 +8,11 @@ import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.config.ConfigPaths;
-import top.tangge233.netbridge.jni.NativeBridge;
-import top.tangge233.netbridge.jni.NativeLoader;
 import top.tangge233.netbridge.neoforge.mc.NativeServerTransport;
+import top.tangge233.netbridge.runtime.NetBridgeNative;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.server.NativeAcceptor;
 
-/**
- * NeoForge 入口：初始化配置并尝试加载原生库（含 ABI 校验），并在 ServerStarted/ServerStopping 事件上启停 QUIC/KCP acceptor。
- */
 @Mod(NetBridgeNeoForgeMod.MOD_ID)
 public class NetBridgeNeoForgeMod {
 
@@ -26,25 +22,23 @@ public class NetBridgeNeoForgeMod {
         var paths = new ConfigPaths(FMLPaths.CONFIGDIR.get().resolve("net-bridge"));
         NetBridgeServices.bootstrap(paths);
 
-        if (!NativeLoader.load()) {
+        if (!NetBridgeNative.ensureStarted()) {
             NetBridge.LOGGER.error(
                     "net-bridge native unavailable; accelerated transports disabled (TCP fallback)"
             );
-        } else {
-            NetBridge.LOGGER.info(
-                    "net-bridge NeoForge loaded: native ABI {}",
-                    NativeBridge.version()
-            );
         }
+
         NeoForge.EVENT_BUS.addListener((ServerStartedEvent e) -> {
             var server = e.getServer();
-            NativeAcceptor.setConnectionHandler(connId -> NativeServerTransport.adopt(
-                    server,
-                    connId
-            ));
-            NativeAcceptor.start(server.getPort(), server.getLocalIp());
+            NativeAcceptor.setConnectionHandler(connection ->
+                    NativeServerTransport.adopt(server, connection)
+            );
+            NativeAcceptor.start(
+                    server.getPort(),
+                    server.getLocalIp()
+            );
         });
-        NeoForge.EVENT_BUS.addListener((ServerStoppingEvent e) -> {
+        NeoForge.EVENT_BUS.addListener((ServerStoppingEvent _) -> {
             NativeAcceptor.setConnectionHandler(null);
             NativeAcceptor.stop();
         });

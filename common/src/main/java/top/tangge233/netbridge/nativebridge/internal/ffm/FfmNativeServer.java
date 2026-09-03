@@ -1,14 +1,12 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
+import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.jspecify.annotations.Nullable;
 
-/**
- * 一个运行中 native 服务端的 FFM 实现。
- */
 public final class FfmNativeServer implements NativeServer {
 
     private final FfmNativeTransportBackend owner;
@@ -67,7 +65,12 @@ public final class FfmNativeServer implements NativeServer {
             for (var conn : accepted) {
                 try {
                     conn.close();
-                } catch (RuntimeException _) {
+                } catch (RuntimeException e) {
+                    NetBridge.LOGGER.warn(
+                            "Error closing accepted connection {}: {}",
+                            conn.id(),
+                            e.getMessage()
+                    );
                 }
             }
             accepted.clear();
@@ -89,7 +92,7 @@ public final class FfmNativeServer implements NativeServer {
         }
     }
 
-    void handleStateChanged(int arg0) {
+    void handleStateChanged() {
         var l = listener;
         if (l != null) {
             l.onStateChanged(NativeServerState.RUNNING);
