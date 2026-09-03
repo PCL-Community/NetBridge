@@ -8,16 +8,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import top.tangge233.netbridge.transport.ConnectStatus;
+import top.tangge233.netbridge.client.ConnectionSnapshot;
+import top.tangge233.netbridge.runtime.NetBridgeServices;
 import top.tangge233.netbridge.transport.TransportMode;
 
-/**
- * 连接屏幕另起一行渲染实际状态机文案：「正在建立 X 连接」→
- * 「正在回退 TCP 连接」。由 {@link ConnectStatus} 驱动，非配置回显。
- *
- * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
- * 修改时必须同步两处。
- */
 @Mixin(ConnectScreen.class)
 public abstract class ConnectScreenMixin extends Screen {
 
@@ -25,23 +19,45 @@ public abstract class ConnectScreenMixin extends Screen {
         super(title);
     }
 
-    @Inject(method = "render(Lnet/minecraft/client/gui/GuiGraphics;IIF)V", at = @At("TAIL"))
+    @Inject(
+            method = "render(Lnet/minecraft/client/gui/GuiGraphics;IIF)V",
+            at = @At("TAIL")
+    )
     private void netbridge$drawStatusLine(
-            GuiGraphics graphics, int mouseX, int mouseY, float partialTick, CallbackInfo ci) {
-        var phase = ConnectStatus.phase();
-        if (phase == ConnectStatus.Phase.IDLE) {
+            GuiGraphics graphics,
+            int mouseX,
+            int mouseY,
+            float partialTick,
+            CallbackInfo ci
+    ) {
+        var snapshot = NetBridgeServices.clientRuntime().snapshot();
+        if (snapshot.phase() == ConnectionSnapshot.Phase.IDLE
+                || snapshot.phase() == ConnectionSnapshot.Phase.CONNECTED
+        ) {
             return;
         }
+
         Component text;
-        if (phase == ConnectStatus.Phase.CONNECTING) {
-            TransportMode mode = ConnectStatus.mode();
-            String modeKey = mode == null ? TransportMode.TCP.configValue() : mode.configValue();
+        if (snapshot.phase() == ConnectionSnapshot.Phase.CONNECTING) {
+            var mode = snapshot.requestedMode();
+            var modeKey = mode == null
+                    ? TransportMode.TCP.configValue()
+                    : mode.configValue();
             text = Component.translatable(
                     "netbridge.connect.connecting",
-                    Component.translatable("netbridge.transport." + modeKey));
+                    Component.translatable("netbridge.transport." + modeKey)
+            );
         } else {
             text = Component.translatable("netbridge.connect.falling_back");
         }
-        graphics.drawCenteredString(this.font, text, this.width / 2, this.height / 2 - 65, 0xFFFFFF);
+
+        graphics.drawCenteredString(
+                this.font,
+                text,
+                this.width / 2,
+                this.height / 2 - 65,
+                0xFFFFFF
+        );
     }
+
 }

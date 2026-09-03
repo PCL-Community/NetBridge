@@ -31,7 +31,10 @@ public final class NativeServerTransport {
         }
 
         var pipeline = channel.pipeline();
-        pipeline.addLast("timeout", new ReadTimeoutHandler(30));
+        pipeline.addLast(
+                "timeout",
+                new ReadTimeoutHandler(30)
+        );
 
         Connection.configureSerialization(
                 pipeline,
@@ -44,12 +47,13 @@ public final class NativeServerTransport {
         var mcConnection = rateLimit > 0
                 ? new RateKickingConnection(rateLimit)
                 : new Connection(PacketFlow.SERVERBOUND);
+
         mcConnection.configurePacketHandler(pipeline);
         mcConnection.setListenerForServerboundHandshake(
                 new ServerHandshakePacketListenerImpl(server, mcConnection)
         );
 
-        EventLoopGroup group = ServerConnectionListener.SERVER_EVENT_GROUP.get();
+        var group = (EventLoopGroup) ServerConnectionListener.SERVER_EVENT_GROUP.get();
         group.register(channel).syncUninterruptibly();
 
         server.getConnection().getConnections().add(mcConnection);

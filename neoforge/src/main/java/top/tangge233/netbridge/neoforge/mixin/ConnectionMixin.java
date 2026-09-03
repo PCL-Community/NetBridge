@@ -10,17 +10,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.neoforge.mc.NativeClientTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
-import top.tangge233.netbridge.transport.ConnectionDisplay;
-import top.tangge233.netbridge.transport.TransportSelector;
 
 import java.net.InetSocketAddress;
 
-/**
- * 客户端出站连接拦截：目标宣告了可用加速传输且模式开启时改用 native 通道； 握手两次失败自动回退原版 TCP。
- *
- * <p>注意：本文件在 :neoforge 与 :fabric 各有一份源码副本，
- * 修改时必须同步两处。
- */
 @Mixin(Connection.class)
 public abstract class ConnectionMixin {
 
@@ -43,21 +35,10 @@ public abstract class ConnectionMixin {
             return;
         }
 
-        ConnectionDisplay.clear();
-        var mode = NetBridgeServices.clientSettings().current().mode();
-        var targetOpt = TransportSelector.decide(address);
-        if (targetOpt.isEmpty()) {
-            NetBridge.LOGGER.info("Transport for {}: TCP (mode={})", address, mode);
+        if (!NetBridgeServices.clientRuntime().acceleratedRequested()) {
+            NetBridge.LOGGER.info("Transport for {}: TCP (mode=tcp)", address);
             return;
         }
-
-        var target = targetOpt.get();
-        NetBridge.LOGGER.info(
-                "Transport for {}: {} endpoint {}",
-                address,
-                target.mode(),
-                target.endpoint()
-        );
 
         NETBRIDGE_IN_PROGRESS.set(Boolean.TRUE);
 
@@ -66,8 +47,7 @@ public abstract class ConnectionMixin {
                     NativeClientTransport.connectWithFallback(
                             address,
                             useEpoll,
-                            connection,
-                            target
+                            connection
                     )
             );
         } finally {

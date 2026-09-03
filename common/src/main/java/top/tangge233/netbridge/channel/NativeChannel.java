@@ -403,18 +403,16 @@ public class NativeChannel extends AbstractChannel {
     }
 
     private void marshal(Runnable action) {
-        if (closed.get()) {
+        if (closed.get() || !isRegistered()) {
             return;
         }
 
         var loop = eventLoop();
-        if (loop == null) {
-            return;
-        }
 
         try {
             loop.execute(action);
-        } catch (RejectedExecutionException _) {
+        } catch (RejectedExecutionException e) {
+            pendingWake.set(false);
         }
     }
 

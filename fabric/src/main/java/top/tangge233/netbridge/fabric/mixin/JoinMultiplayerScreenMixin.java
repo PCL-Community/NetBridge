@@ -43,7 +43,7 @@ public abstract class JoinMultiplayerScreenMixin extends Screen {
                                 110,
                                 20,
                                 Component.translatable("netbridge.transport.mode"),
-                                (btn, mode) ->
+                                (_, mode) ->
                                         NetBridgeServices.clientSettings().updateMode(mode)
                         );
         button.setTooltip(Tooltip.create(
