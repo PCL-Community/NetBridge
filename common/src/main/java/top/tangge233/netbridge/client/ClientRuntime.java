@@ -47,9 +47,13 @@ public final class ClientRuntime {
                 current,
                 capabilities.get(tcpAddress),
                 successfulEndpoints.lookup(tcpAddress, current.mode()),
-                backend != null
+                nativeAvailable()
         );
         return executor.execute(plan, backend, adapter);
+    }
+
+    public boolean nativeAvailable() {
+        return backend != null && backend.availability().available();
     }
 
     public void recordServerCapabilities(

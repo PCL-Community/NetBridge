@@ -4,7 +4,6 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.config.ConfigPaths;
-import top.tangge233.netbridge.runtime.NetBridgeNative;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 public class NetBridgeFabricMod implements ModInitializer {
@@ -20,7 +19,7 @@ public class NetBridgeFabricMod implements ModInitializer {
         );
         NetBridgeServices.bootstrap(paths);
 
-        if (!NetBridgeNative.ensureStarted()) {
+        if (!NetBridgeServices.nativeAvailable()) {
             NetBridge.LOGGER.error(
                     "net-bridge native unavailable; accelerated transports disabled (TCP fallback)"
             );
