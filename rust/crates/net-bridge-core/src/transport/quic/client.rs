@@ -10,9 +10,7 @@ use tokio::sync::mpsc;
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
 use crate::socket_util;
-use crate::{
-    Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded,
-};
+use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING};
 
 /// 经 NativeContext 发起 QUIC 客户端连接。
 pub fn connect_in_context(
@@ -23,7 +21,7 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let conn_id = ctx.allocate_id();
+    let conn_id = ctx.allocate_id()?;
     ctx.conns().insert(
         conn_id,
         ConnHandle::new(
@@ -33,67 +31,38 @@ pub fn connect_in_context(
             None,
             None,
             false,
-            true,
             None,
         ),
     );
 
     let host = host.to_string();
-    let ctx_clone = Arc::clone(ctx);
-    let ctx_cleanup = Arc::clone(ctx);
-    ctx.handle().spawn(async move {
-        let panicked = guarded("quic connect task in context", async move {
-            let mut rx = to_transport_rx;
-            if let Some((conn, send, recv)) =
-                establish(&ctx_clone, &host, port, conn_id, &state, &mut rx).await
-            {
-                state.store(STATE_CONNECTED, Ordering::SeqCst);
-                ctx_clone.event_sink().on_event(
-                    crate::event::NB_EVENT_CONNECTION_STATE,
-                    conn_id,
-                    crate::event::abi_connection_state(STATE_CONNECTED) as i64,
-                    0,
-                );
-                super::connection::run_connection_with_sink(
-                    conn_id,
-                    conn,
-                    send,
-                    recv,
-                    rx,
-                    to_java_tx,
-                    to_transport_tx,
-                    state,
-                    ctx_clone.event_sink().clone(),
-                    {
-                        let c = Arc::clone(&ctx_clone);
-                        Box::new(move |id| {
-                            c.remove_conn(id);
-                        })
-                    },
-                )
-                .await;
-            } else {
-                let st = state.load(Ordering::SeqCst);
-                if st == STATE_FAILED {
-                    ctx_clone.event_sink().on_event(
-                        crate::event::NB_EVENT_CONNECTION_STATE,
-                        conn_id,
-                        crate::event::abi_connection_state(STATE_FAILED) as i64,
-                        0,
-                    );
-                } else if st == STATE_CLOSED {
-                    ctx_clone.event_sink().on_event(
-                        crate::event::NB_EVENT_CONNECTION_STATE,
-                        conn_id,
-                        crate::event::abi_connection_state(STATE_CLOSED) as i64,
-                        0,
-                    );
-                }
-            }
-        })
-        .await;
-        if panicked {
-            ctx_cleanup.remove_conn(conn_id);
+    let ctx_task = Arc::clone(ctx);
+    ctx.spawn_connection_task("quic connect task in context", conn_id, async move {
+        let mut rx = to_transport_rx;
+        if let Some((conn, send, recv)) =
+            establish(&ctx_task, &host, port, conn_id, &state, &mut rx).await
+        {
+            state.store(STATE_CONNECTED, Ordering::SeqCst);
+            ctx_task.event_sink().on_event(
+                crate::event::NB_EVENT_CONNECTION_STATE,
+                conn_id,
+                crate::event::abi_connection_state(STATE_CONNECTED) as i64,
+                0,
+            );
+            super::connection::run_connection_with_sink(
+                conn_id,
+                conn,
+                send,
+                recv,
+                rx,
+                to_java_tx,
+                to_transport_tx,
+                state,
+                Arc::clone(&ctx_task),
+            )
+            .await;
+        } else {
+            ctx_task.emit_terminal(conn_id);
         }
     });
     Ok(conn_id)
@@ -168,6 +137,7 @@ async fn establish(
         cancel(ctx, conn_id, state);
         return None;
     }
+    ctx.set_conn_remote_addr(conn_id, addr);
     Some((conn, send, recv))
 }
 
@@ -226,12 +196,12 @@ fn fail<T>(
     err: BridgeError,
 ) -> Option<T> {
     state.store(crate::STATE_FAILED, Ordering::SeqCst);
-    ctx.remove_conn(conn_id);
+    ctx.emit_terminal(conn_id);
     report_error(err.message());
     None
 }
 
 fn cancel(ctx: &crate::context::NativeContext, conn_id: u64, state: &Arc<AtomicU32>) {
     state.store(STATE_CLOSED, Ordering::SeqCst);
-    ctx.remove_conn(conn_id);
+    ctx.emit_terminal(conn_id);
 }

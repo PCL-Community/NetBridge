@@ -20,6 +20,8 @@ val nativeIntegrationTest = tasks.register<Test>("nativeIntegrationTest") {
     group = "verification"
 
     useJUnitPlatform()
+    testClassesDirs = sourceSets.named("test").get().output.classesDirs
+    classpath = sourceSets.named("test").get().runtimeClasspath
     dependsOn(rootProject.tasks.named("buildCdylib"))
     jvmArgs(
         "-Dnetbridge.native.path=${cdylibDir.get().asFile}/${NativePlatform.subdir}/${NativePlatform.cdylibName}",

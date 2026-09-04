@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  java-unit:
+    name: Java unit + architecture guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Architecture verification (FFM allowlist / JNI zero / purity)
+        run: gradle verifyArchitecture -PskipNativeBuild
+
+      - name: Java tests (no native required)
+        run: gradle test -PskipNativeBuild
+
+  rust-unit:
+    name: Rust fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo fmt --check
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        working-directory: rust
+        run: cargo test --workspace
+
+  abi-native-integration:
+    name: ABI symbols + FFM integration (deny mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.7.1'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Build native (release)
+        working-directory: rust
+        run: cargo build -p net-bridge-native --release
+
+      - name: Verify exported business symbols
+        run: |
+          symbols=$(nm -D rust/target/release/libnet_bridge_native.so | awk '$2 == "T" {print $3}' | grep -v '^_' || true)
+          unexpected=$(printf '%s\n' "$symbols" | grep -v '^netbridge_get_api$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "unexpected exported symbols: $unexpected"
+            exit 1
+          fi
+          echo "exported business symbols: $symbols"
+
+      - name: Generate native manifest
+        run: gradle generateNativeManifest -PnativeProfile=release
+
+      - name: FFM integration tests (--illegal-native-access=deny)
+        run: gradle :common:nativeIntegrationTest -PnativeProfile=release

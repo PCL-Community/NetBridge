@@ -134,7 +134,7 @@ class ConnectionExecutorTest {
     }
 
     @Test
-    void nativeSuccessRecordsAndPublishesConnected() {
+    void nativeSuccessRecordsAndPublishesConnected() throws Exception {
         var successCache = new SuccessfulEndpointCache();
         var store = new ConnectionStateStore();
         var executor = new ConnectionExecutor(
@@ -153,6 +153,10 @@ class ConnectionExecutorTest {
                     plan,
                     backend,
                     adapter
+            );
+            assertTrue(
+                    future.await(15, TimeUnit.SECONDS),
+                    "native 成功路径应在超时内完成"
             );
             assertTrue(
                     future.isSuccess(),

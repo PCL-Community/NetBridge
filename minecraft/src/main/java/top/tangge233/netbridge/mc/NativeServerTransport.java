@@ -50,15 +50,16 @@ public final class NativeServerTransport {
                 new ServerHandshakePacketListenerImpl(server, mcConnection)
         );
 
-        var group = (EventLoopGroup) ServerConnectionListener.SERVER_EVENT_GROUP.get();
-        group.register(channel).syncUninterruptibly();
-
-        server.getConnection().getConnections().add(mcConnection);
-        NetBridge.LOGGER.info(
-                "Connection {} adopted into server pipeline (channel {})",
-                connection.id(),
-                channel.connId()
-        );
+        server.execute(() -> {
+            var group = (EventLoopGroup) ServerConnectionListener.SERVER_EVENT_GROUP.get();
+            group.register(channel).syncUninterruptibly();
+            server.getConnection().getConnections().add(mcConnection);
+            NetBridge.LOGGER.info(
+                    "Connection {} adopted into server pipeline (channel {})",
+                    connection.id(),
+                    channel.connId()
+            );
+        });
     }
 
 }

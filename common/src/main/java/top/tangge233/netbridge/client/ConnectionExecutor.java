@@ -14,7 +14,6 @@ import top.tangge233.netbridge.transport.TransportTarget;
 
 import java.net.ConnectException;
 import java.util.concurrent.TimeUnit;
-
 import org.jspecify.annotations.Nullable;
 
 public final class ConnectionExecutor {
@@ -33,6 +32,41 @@ public final class ConnectionExecutor {
         this.retryPolicy = retryPolicy;
     }
 
+    private static NativeConnectRequest buildRequest(
+            ConnectionPlan.NativeAttemptPlan attempt
+    ) {
+        var kind = switch (attempt.mode()) {
+            case QUIC -> NativeTransportKind.QUIC;
+            case KCP -> NativeTransportKind.KCP;
+            case TCP -> throw new IllegalStateException("tcp mode has no native attempt");
+        };
+        var profile = attempt.kcpProfile() == KcpProfile.AGGRESSIVE
+                ? NativeConnectRequest.KcpProfileValue.AGGRESSIVE
+                : NativeConnectRequest.KcpProfileValue.BALANCED;
+        return new NativeConnectRequest(
+                kind,
+                attempt.endpoint().getHostString(),
+                attempt.endpoint().getPort(),
+                profile
+        );
+    }
+
+    private static String transportLine(ConnectionPlan.NativeAttemptPlan attempt) {
+        return "%s %s:%d".formatted(
+                attempt.mode().name(),
+                attempt.endpoint().getHostString(),
+                attempt.endpoint().getPort()
+        );
+    }
+
+    private static void closeQuietly(Channel channel) {
+        try {
+            var _ = channel.close();
+        } catch (Throwable e) {
+            NetBridge.LOGGER.debug("Failed to close channel quietly", e);
+        }
+    }
+
     public ChannelFuture execute(
             ConnectionPlan plan,
             @Nullable NativeTransportBackend backend,
@@ -42,73 +76,150 @@ public final class ConnectionExecutor {
         if (backend == null || attemptOpt.isEmpty()) {
             return fallbackToTcp(plan, adapter);
         }
-        var attempt = attemptOpt.get();
 
-        Throwable last = null;
-        for (var current = 1; current <= retryPolicy.maxAttempts(); current++) {
-            stateStore.connecting(attempt.mode());
-            ChannelFuture future;
-            try {
-                future = tryNativeAttempt(backend, attempt, adapter, current);
-            } catch (Throwable t) {
-                last = t;
-                NetBridge.LOGGER.warn(
-                        "Handshake to {} via {} failed (attempt {}/{}): {}",
-                        plan.tcpAddress(),
+        var result = new DelegatingChannelFuture(adapter.eventLoopGroup());
+        runAttempt(
+                plan,
+                backend,
+                adapter,
+                attemptOpt.get(),
+                1,
+                result
+        );
+        return result;
+    }
+
+    private void runAttempt(
+            ConnectionPlan plan,
+            NativeTransportBackend backend,
+            ConnectionExecutorAdapter adapter,
+            ConnectionPlan.NativeAttemptPlan attempt,
+            int attemptNumber,
+            DelegatingChannelFuture result
+    ) {
+        stateStore.connecting(attempt.mode());
+        ChannelFuture attemptFuture;
+        try {
+            attemptFuture = tryNativeAttempt(
+                    backend,
+                    attempt,
+                    adapter,
+                    attemptNumber
+            );
+        } catch (Throwable t) {
+            handleAttemptFailure(
+                    plan,
+                    backend,
+                    adapter,
+                    attempt,
+                    attemptNumber,
+                    result,
+                    t,
+                    null
+            );
+            return;
+        }
+        result.setDelegate(attemptFuture, false);
+        attemptFuture.addListener(f -> {
+            if (f.isSuccess()) {
+                stateStore.connected(
                         attempt.mode(),
-                        current,
-                        retryPolicy.maxAttempts(),
-                        t.getMessage()
+                        transportLine(attempt)
                 );
-                continue;
-            }
-            try {
-                future.syncUninterruptibly();
-                stateStore.connected(attempt.mode(), transportLine(attempt));
                 successCache.record(
-                        plan.tcpAddress(), new TransportTarget(
+                        plan.tcpAddress(),
+                        new TransportTarget(
                                 attempt.mode(),
                                 attempt.endpoint()
                         )
                 );
-                return future;
-            } catch (Throwable t) {
-                last = t;
-                closeQuietly(future.channel());
-                NetBridge.LOGGER.warn(
-                        "Handshake to {} via {} failed (attempt {}/{}): {}",
-                        plan.tcpAddress(),
-                        attempt.mode(),
-                        current,
-                        retryPolicy.maxAttempts(),
-                        t.getMessage()
-                );
+                result.setDelegate(attemptFuture, true);
+                return;
             }
-        }
-
-        NetBridge.LOGGER.warn(
-                "Transport {} to {} failed ({}), falling back to TCP",
-                attempt.mode(),
-                plan.tcpAddress(),
-                last != null
-                        ? last.getMessage()
-                        : "unknown error"
-        );
-        return fallbackToTcp(plan, adapter);
+            handleAttemptFailure(
+                    plan,
+                    backend,
+                    adapter,
+                    attempt,
+                    attemptNumber,
+                    result,
+                    f.cause(),
+                    attemptFuture.channel()
+            );
+        });
     }
 
-    private ChannelFuture fallbackToTcp(
+    private void handleAttemptFailure(
             ConnectionPlan plan,
-            ConnectionExecutorAdapter adapter
+            NativeTransportBackend backend,
+            ConnectionExecutorAdapter adapter,
+            ConnectionPlan.NativeAttemptPlan attempt,
+            int attemptNumber,
+            DelegatingChannelFuture result,
+            @Nullable Throwable cause,
+            @Nullable Channel failedChannel
     ) {
-        stateStore.fallingBack();
-        ChannelFuture tcp;
-        try {
-            tcp = adapter.openTcp(plan.tcpAddress());
-        } finally {
-            stateStore.idle();
+        var causeMessage = cause != null
+                ? cause.getMessage()
+                : "unknown error";
+        NetBridge.LOGGER.warn(
+                "Handshake to {} via {} failed (attempt {}/{}): {}",
+                plan.tcpAddress(),
+                attempt.mode(),
+                attemptNumber,
+                retryPolicy.maxAttempts(),
+                causeMessage
+        );
+        if (failedChannel != null) {
+            closeQuietly(failedChannel);
         }
-        return tcp;
+
+        var retryable = retryPolicy.isRetryable(cause);
+        if (retryable && attemptNumber < retryPolicy.maxAttempts()) {
+            var delay = retryPolicy.retryBackoffMillisForAttempt(attemptNumber);
+            var next = attemptNumber + 1;
+            if (delay <= 0) {
+                runAttempt(
+                        plan,
+                        backend,
+                        adapter,
+                        attempt,
+                        next,
+                        result
+                );
+            } else {
+                adapter.eventLoopGroup().next().schedule(
+                        () -> runAttempt(
+                                plan,
+                                backend,
+                                adapter,
+                                attempt,
+                                next,
+                                result
+                        ),
+                        delay,
+                        TimeUnit.MILLISECONDS
+                );
+            }
+            return;
+        }
+        if (!retryable) {
+            NetBridge.LOGGER.warn(
+                    "Transport error to {} is non-retryable ({}); falling back to TCP",
+                    plan.tcpAddress(),
+                    causeMessage
+            );
+        } else {
+            NetBridge.LOGGER.warn(
+                    "Transport {} to {} failed after {} attempts ({}), falling back to TCP",
+                    attempt.mode(),
+                    plan.tcpAddress(),
+                    retryPolicy.maxAttempts(),
+                    causeMessage
+            );
+        }
+        var tcpFuture = fallbackToTcp(plan, adapter);
+        result.setDelegate(tcpFuture, true);
     }
 
     private ChannelFuture tryNativeAttempt(
@@ -142,41 +253,18 @@ public final class ConnectionExecutor {
                 retryPolicy.timeoutMillisForAttempt(attemptNumber),
                 TimeUnit.MILLISECONDS
         );
-        future.addListener(ignored -> watchdog.cancel(false));
+        future.addListener(_ -> watchdog.cancel(false));
         return future;
     }
 
-    private static String transportLine(ConnectionPlan.NativeAttemptPlan attempt) {
-        return "%s %s:%d".formatted(
-                attempt.mode().name(),
-                attempt.endpoint().getHostString(),
-                attempt.endpoint().getPort()
-        );
-    }
-
-    private static void closeQuietly(Channel channel) {
-        try {
-            channel.close().syncUninterruptibly();
-        } catch (Throwable e) {
-            NetBridge.LOGGER.debug("Failed to close channel quietly", e);
-        }
-    }
-
-    private static NativeConnectRequest buildRequest(ConnectionPlan.NativeAttemptPlan attempt) {
-        var kind = switch (attempt.mode()) {
-            case QUIC -> NativeTransportKind.QUIC;
-            case KCP -> NativeTransportKind.KCP;
-            case TCP -> throw new IllegalStateException("tcp mode has no native attempt");
-        };
-        var profile = attempt.kcpProfile() == KcpProfile.AGGRESSIVE
-                ? NativeConnectRequest.KcpProfileValue.AGGRESSIVE
-                : NativeConnectRequest.KcpProfileValue.BALANCED;
-        return new NativeConnectRequest(
-                kind,
-                attempt.endpoint().getHostString(),
-                attempt.endpoint().getPort(),
-                profile
-        );
+    private ChannelFuture fallbackToTcp(
+            ConnectionPlan plan,
+            ConnectionExecutorAdapter adapter
+    ) {
+        stateStore.fallingBack();
+        var tcp = adapter.openTcp(plan.tcpAddress());
+        tcp.addListener(ignored -> stateStore.idle());
+        return tcp;
     }
 
 }

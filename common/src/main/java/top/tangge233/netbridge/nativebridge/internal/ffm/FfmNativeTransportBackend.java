@@ -4,8 +4,11 @@ import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class FfmNativeTransportBackend
         implements NativeTransportBackend, NativeEventListener {
@@ -14,6 +17,8 @@ public final class FfmNativeTransportBackend
     private final FfmNativeContext context;
     private final Map<Long, FfmNativeConnection> connections = new ConcurrentHashMap<>();
     private final Map<Long, FfmNativeServer> servers = new ConcurrentHashMap<>();
+    private final Map<Long, List<Long>> pendingAccepted = new ConcurrentHashMap<>();
+    private final AtomicBoolean closeOnce = new AtomicBoolean(false);
 
     private volatile NativeBackendState state = NativeBackendState.NEW;
 
@@ -25,7 +30,10 @@ public final class FfmNativeTransportBackend
         this.context = context;
     }
 
-    public static FfmNativeTransportBackend load(Path libraryPath, int workerThreads) {
+    public static FfmNativeTransportBackend load(
+            Path libraryPath,
+            int workerThreads
+    ) {
         var library = FfmNativeLibrary.load(libraryPath);
         FfmNativeContext context;
         try {
@@ -39,7 +47,7 @@ public final class FfmNativeTransportBackend
         }
         var backend = new FfmNativeTransportBackend(library, context);
         backend.state = NativeBackendState.AVAILABLE;
-        library.dispatcher().addListener(backend);
+        context.dispatcher().addListener(backend);
         return backend;
     }
 
@@ -82,6 +90,7 @@ public final class FfmNativeTransportBackend
         var conn = new FfmNativeConnection(
                 this,
                 connId,
+                null,
                 kind,
                 NativeConnectionState.CONNECTING
         );
@@ -106,21 +115,34 @@ public final class FfmNativeTransportBackend
                 kind
         );
         servers.put(serverId, server);
+        var buffered = pendingAccepted.remove(serverId);
+        if (buffered != null) {
+            buffered.forEach(connId -> {
+                var acceptedConn = new FfmNativeConnection(
+                        this,
+                        connId,
+                        server,
+                        kind,
+                        NativeConnectionState.CONNECTED
+                );
+                connections.put(connId, acceptedConn);
+                server.handleAccepted(acceptedConn);
+            });
+        }
         return server;
     }
 
     @Override
     public void close() {
-        var prev = state;
-        if (prev == NativeBackendState.CLOSED || prev == NativeBackendState.CLOSING) {
+        if (!closeOnce.compareAndSet(false, true)) {
             return;
         }
 
         state = NativeBackendState.CLOSING;
-        library.dispatcher().removeListener(this);
+        context.dispatcher().removeListener(this);
 
         try {
-            for (var server : servers.values()) {
+            servers.values().forEach(server -> {
                 try {
                     server.close();
                 } catch (RuntimeException e) {
@@ -130,11 +152,11 @@ public final class FfmNativeTransportBackend
                             e.getMessage()
                     );
                 }
-            }
+            });
 
             servers.clear();
 
-            for (var conn : connections.values()) {
+            connections.values().forEach(conn -> {
                 try {
                     conn.close();
                 } catch (RuntimeException e) {
@@ -144,7 +166,7 @@ public final class FfmNativeTransportBackend
                             e.getMessage()
                     );
                 }
-            }
+            });
 
             connections.clear();
             context.shutdown(2000);
@@ -191,6 +213,7 @@ public final class FfmNativeTransportBackend
                     }
                 }
                 case NativeEvent.KIND_WRITABLE -> {
+                    System.err.println("[dbg] WRITABLE event for " + event.objectId());
                     var conn = connections.get(event.objectId());
                     if (conn != null) {
                         conn.handleWritable();
@@ -202,11 +225,19 @@ public final class FfmNativeTransportBackend
                         var accepted = new FfmNativeConnection(
                                 this,
                                 event.arg0(),
+                                server,
                                 server.transport(),
                                 NativeConnectionState.CONNECTED
                         );
                         connections.put(event.arg0(), accepted);
                         server.handleAccepted(accepted);
+                    } else {
+                        pendingAccepted
+                                .computeIfAbsent(
+                                        event.objectId(),
+                                        _ -> new ArrayList<>()
+                                )
+                                .add(event.arg0());
                     }
                 }
                 case NativeEvent.KIND_SERVER_STATE -> {

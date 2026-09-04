@@ -4,10 +4,11 @@ use bytes::Bytes;
 use std::time::{Duration, Instant};
 
 use crate::context::NativeContext;
+use crate::event::{EventSink, NB_EVENT_ACCEPTED};
 use crate::transport::TransportKind;
 use crate::*;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn wait_state(ctx: &NativeContext, conn: u64, want: u32) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -55,13 +56,41 @@ fn wait_read(ctx: &NativeContext, conn: u64, want: usize) -> Vec<u8> {
     }
 }
 
-fn test_ctx() -> Arc<NativeContext> {
-    NativeContext::new(2, None).expect("native context")
+struct RecordingSink(Mutex<Vec<(u32, u64, i64, i64)>>);
+
+impl EventSink for RecordingSink {
+    fn on_event(&self, kind: u32, object_id: u64, arg0: i64, arg1: i64) {
+        self.0.lock().unwrap().push((kind, object_id, arg0, arg1));
+    }
+}
+
+fn test_ctx() -> (Arc<NativeContext>, Arc<RecordingSink>) {
+    let sink = Arc::new(RecordingSink(Mutex::new(Vec::new())));
+    let ctx = NativeContext::new(2, Some(sink.clone())).expect("native context");
+    (ctx, sink)
+}
+
+fn wait_accepted(sink: &RecordingSink, server: u64) -> u64 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let hit = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(k, o, _, _)| *k == NB_EVENT_ACCEPTED && *o == server)
+            .map(|(_, _, a, _)| *a as u64);
+        if let Some(conn) = hit {
+            return conn;
+        }
+        assert!(Instant::now() < deadline, "timeout waiting for ACCEPTED");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 #[test]
 fn quic_loopback_roundtrip() {
-    let ctx = test_ctx();
+    let (ctx, sink) = test_ctx();
     let server = ctx
         .start_server(TransportKind::Quic, 0, 256, None, Default::default())
         .expect("start server");
@@ -71,20 +100,7 @@ fn quic_loopback_roundtrip() {
         .expect("connect");
     wait_state(&ctx, client, STATE_CONNECTED);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let accepted = loop {
-        let a = ctx.accept_connections(server);
-        if !a.is_empty() {
-            break a;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timeout waiting for server accept"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    assert_eq!(accepted.len(), 1, "server should see one connection");
-    let server_conn = accepted[0];
+    let server_conn = wait_accepted(&sink, server);
     assert_eq!(ctx.connection_state(server_conn), Some(STATE_CONNECTED));
 
     // client -> server
@@ -112,7 +128,7 @@ fn quic_loopback_roundtrip() {
 
 #[test]
 fn quic_peer_close_propagates_to_client() {
-    let ctx = test_ctx();
+    let (ctx, sink) = test_ctx();
     let server = ctx
         .start_server(TransportKind::Quic, 0, 256, None, Default::default())
         .expect("start server");
@@ -122,19 +138,7 @@ fn quic_peer_close_propagates_to_client() {
         .expect("connect");
     wait_state(&ctx, client, STATE_CONNECTED);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let accepted = loop {
-        let a = ctx.accept_connections(server);
-        if !a.is_empty() {
-            break a;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timeout waiting for server accept"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    };
-    let server_conn = accepted[0];
+    let server_conn = wait_accepted(&sink, server);
 
     assert!(ctx.close_connection(server_conn));
     wait_disconnected(&ctx, client);

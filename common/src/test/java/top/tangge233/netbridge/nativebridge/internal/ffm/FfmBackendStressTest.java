@@ -130,10 +130,101 @@ class FfmBackendStressTest {
     }
 
     @Test
+    void wouldBlockIsResolvedByRustWritableEvent() throws Exception {
+        try (var backend = FfmNativeTransportBackend.load(nativeLibPath, 2)) {
+            var server = backend.startServer(NativeServerRequest.quic(0, 8));
+            var accepted = new CountDownLatch(1);
+            var serverConnRef = new AtomicReference<NativeConnection>();
+
+            server.setListener(new NativeServerListener() {
+                @Override
+                public void onAccepted(@NonNull NativeConnection connection) {
+                    serverConnRef.set(connection);
+                    accepted.countDown();
+                }
+            });
+            var client = backend.connect(
+                    NativeConnectRequest.quic("127.0.0.1", server.localPort())
+            );
+
+            awaitState(client, NativeConnectionState.CONNECTED);
+            assertTrue(accepted.await(10, TimeUnit.SECONDS));
+
+            var serverConn = serverConnRef.get();
+
+            awaitState(serverConn, NativeConnectionState.CONNECTED);
+            serverConn.setListener(new NativeConnectionListener() {
+            });
+
+            var writable = new CountDownLatch(1);
+            client.setListener(new NativeConnectionListener() {
+                @Override
+                public void onWritable() {
+                    writable.countDown();
+                }
+            });
+
+            var chunk = ByteBuffer.wrap(new byte[64 * 1024]);
+            var blocked = false;
+            var sent = 0;
+            for (var i = 0; i < 8192 && !blocked; i++) {
+                var snapshot = chunk.duplicate();
+                var res = client.write(snapshot);
+                if (res.wouldBlock()) {
+                    blocked = true;
+                } else {
+                    sent += res.bytes();
+                }
+            }
+            assertTrue(blocked, "填满写队列后必须出现 WOULD_BLOCK");
+
+            var readBuf = ByteBuffer.allocate(64 * 1024);
+            var drained = 0L;
+            var readDeadline = System.currentTimeMillis() + 30_000;
+            while (drained < sent && System.currentTimeMillis() < readDeadline) {
+                var res = serverConn.read(readBuf);
+                if (res.progressed()) {
+                    drained += res.bytes();
+                    readBuf.clear();
+                } else {
+                    Thread.sleep(5);
+                }
+            }
+            assertEquals(
+                    sent,
+                    drained,
+                    "回压期间不得丢字节"
+            );
+
+            assertTrue(
+                    writable.await(30, TimeUnit.SECONDS),
+                    "队列恢复空间后必须收到 WRITABLE 事件"
+            );
+
+            var after = client.write(ByteBuffer.wrap(new byte[1024]));
+            assertTrue(
+                    after.progressed(),
+                    "WRITABLE 后写应恢复"
+            );
+
+            server.close();
+            client.close();
+            serverConn.close();
+        }
+    }
+
+    @Test
     void repeatedBackendCyclesStayClean() throws Exception {
         for (var cycle = 0; cycle < 4; cycle++) {
-            try (var backend = FfmNativeTransportBackend.load(nativeLibPath, 2)) {
-                var server = backend.startServer(NativeServerRequest.quic(0, 16));
+            try (
+                    var backend = FfmNativeTransportBackend.load(
+                            nativeLibPath,
+                            2
+                    )
+            ) {
+                var server = backend.startServer(
+                        NativeServerRequest.quic(0, 16)
+                );
                 var accepted = new CountDownLatch(1);
                 var serverConnRef = new AtomicReference<NativeConnection>();
                 server.setListener(new NativeServerListener() {

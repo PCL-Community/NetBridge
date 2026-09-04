@@ -13,7 +13,7 @@ use super::config::{KcpProfile, build_config};
 use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
 use crate::socket_util;
-use crate::{ServerHandle, TransportEndpoint, guarded, try_admit};
+use crate::{ServerHandle, TransportEndpoint, try_admit};
 
 /// 经 NativeContext 启动 KCP 服务端。
 pub fn start_server_in_context(
@@ -22,42 +22,41 @@ pub fn start_server_in_context(
     max_connections: usize,
     bind: Option<IpAddr>,
     profile: KcpProfile,
+    startup_timeout: Duration,
 ) -> Result<u64, BridgeError> {
     let config = build_config(profile);
-    let server_id = ctx.allocate_id();
+    let server_id = ctx.allocate_id()?;
 
     let (tx, rx) = std::sync::mpsc::channel::<Result<u16, BridgeError>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
     let ctx_clone = Arc::clone(ctx);
-    let ctx_cleanup = Arc::clone(ctx);
-
-    ctx.handle().spawn(async move {
+    let accept_task = ctx.handle().spawn(async move {
         let c = Arc::clone(&ctx_clone);
-        let panicked = guarded("kcp accept task in context", async move {
-            server_task_in_context(
-                c,
-                server_id,
-                port,
-                bind,
-                max_connections,
-                config,
-                tx,
-                stop_tx,
-                stop_rx,
-            )
-            .await;
-        })
+        server_task_in_context(
+            c,
+            server_id,
+            port,
+            bind,
+            max_connections,
+            config,
+            tx,
+            stop_tx,
+            stop_rx,
+        )
         .await;
-        if panicked {
-            ctx_cleanup.servers_map().remove(&server_id);
-        }
     });
 
-    match rx.recv_timeout(Duration::from_secs(5)) {
+    let result = match rx.recv_timeout(startup_timeout) {
         Ok(Ok(_port)) => Ok(server_id),
         Ok(Err(msg)) => Err(msg),
-        Err(_) => Err(BridgeError::Other("kcp listener setup timeout".into())),
+        Err(_) => Err(BridgeError::Timeout),
+    };
+    if result.is_err() {
+        // 启动窗口超时：取消任务并回滚任何已插入的 registry 条目，杜绝 orphan server。
+        accept_task.abort();
+        ctx.servers_map().remove(&server_id);
     }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -127,7 +126,9 @@ async fn accept_loop_in_context(
         let (to_transport_tx, to_transport_rx) = mpsc::channel::<crate::Command>(4096);
         let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
         let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-        let conn_id = ctx.allocate_id();
+        let Ok(conn_id) = ctx.allocate_id() else {
+            continue;
+        };
         ctx.conns().insert(
             conn_id,
             crate::ConnHandle::new(
@@ -137,10 +138,10 @@ async fn accept_loop_in_context(
                 Some(server_id),
                 Some(Arc::clone(&conn_count)),
                 false,
-                false,
                 Some(peer),
             ),
         );
+        ctx.set_conn_remote_addr(conn_id, peer);
         ctx.event_sink().on_event(
             crate::event::NB_EVENT_ACCEPTED,
             server_id,
@@ -148,30 +149,19 @@ async fn accept_loop_in_context(
             0,
         );
 
-        let ctx_c = Arc::clone(&ctx);
-        ctx.handle().spawn(async move {
-            let sink = ctx_c.event_sink().clone();
-            let c = Arc::clone(&ctx_c);
-            let panicked = guarded("kcp connection task in context", async move {
-                super::connection::run_kcp_connection_with_sink(
-                    conn_id,
-                    FecStream::new(stream),
-                    to_transport_rx,
-                    to_java_tx,
-                    state,
-                    false,
-                    sink,
-                    Box::new(move |id| {
-                        c.remove_conn(id);
-                    }),
-                )
-                .await;
-            })
-            .await;
-            if panicked {
-                ctx_c.remove_conn(conn_id);
-            }
-        });
+        ctx.spawn_connection_task(
+            "kcp connection task in context",
+            conn_id,
+            super::connection::run_kcp_connection_with_sink(
+                conn_id,
+                FecStream::new(stream),
+                to_transport_rx,
+                to_java_tx,
+                state,
+                false,
+                Arc::clone(&ctx),
+            ),
+        );
     }
 }
 

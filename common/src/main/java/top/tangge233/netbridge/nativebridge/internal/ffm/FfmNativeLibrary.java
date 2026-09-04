@@ -4,31 +4,23 @@ import java.lang.foreign.*;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * 封装原生动态库的符号解析、FFM Upcall Stub 以及 NativeContext 工厂。
- */
 public final class FfmNativeLibrary implements AutoCloseable {
 
     private final Arena arena;
     private final SymbolLookup lookup;
     private final FfmApiV1 api;
-    private final NativeEventDispatcher dispatcher;
-    private final MemorySegment upcallStub;
-    private volatile boolean closed;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
 
     private FfmNativeLibrary(
             Arena arena,
             SymbolLookup lookup,
-            FfmApiV1 api,
-            NativeEventDispatcher dispatcher,
-            MemorySegment upcallStub
+            FfmApiV1 api
     ) {
         this.arena = arena;
         this.lookup = lookup;
         this.api = api;
-        this.dispatcher = dispatcher;
-        this.upcallStub = upcallStub;
     }
 
     public static FfmNativeLibrary load(Path libraryPath) {
@@ -61,30 +53,10 @@ public final class FfmNativeLibrary implements AutoCloseable {
             );
             var api = FfmApiV1.fromSegment(tableSegment);
 
-            var dispatcher = new NativeEventDispatcher();
-            var mh = MethodHandles.lookup().bind(
-                    dispatcher,
-                    "onNativeEvent",
-                    MethodType.methodType(
-                            void.class,
-                            int.class,
-                            long.class,
-                            long.class,
-                            long.class
-                    )
-            );
-            var stub = linker.upcallStub(
-                    mh,
-                    FfmApiLayouts.EVENT_CALLBACK_DESC,
-                    arena
-            );
-
             return new FfmNativeLibrary(
                     arena,
                     lookup,
-                    api,
-                    dispatcher,
-                    stub
+                    api
             );
         } catch (Throwable t) {
             arena.close();
@@ -101,6 +73,24 @@ public final class FfmNativeLibrary implements AutoCloseable {
     public FfmNativeContext createContext(int workerThreads) {
         ensureOpen();
         try (var localArena = Arena.ofConfined()) {
+            var dispatcher = new NativeEventDispatcher();
+            var mh = MethodHandles.lookup().bind(
+                    dispatcher,
+                    "onNativeEvent",
+                    MethodType.methodType(
+                            void.class,
+                            int.class,
+                            long.class,
+                            long.class,
+                            long.class
+                    )
+            );
+            var upcallStub = Linker.nativeLinker().upcallStub(
+                    mh,
+                    FfmApiLayouts.EVENT_CALLBACK_DESC,
+                    arena
+            );
+
             var callbacks = localArena.allocate(FfmApiLayouts.CALLBACKS_V1);
             callbacks.set(
                     ValueLayout.JAVA_INT,
@@ -145,7 +135,7 @@ public final class FfmNativeLibrary implements AutoCloseable {
             if (ctxAddr.equals(MemorySegment.NULL)) {
                 throw new IllegalStateException("context_create returned null context pointer");
             }
-            return new FfmNativeContext(api, ctxAddr);
+            return new FfmNativeContext(api, ctxAddr, dispatcher);
         } catch (Throwable t) {
             if (t instanceof RuntimeException re) {
                 throw re;
@@ -155,7 +145,7 @@ public final class FfmNativeLibrary implements AutoCloseable {
     }
 
     private void ensureOpen() {
-        if (closed) {
+        if (closed.get()) {
             throw new IllegalStateException("FfmNativeLibrary is closed");
         }
     }
@@ -164,20 +154,16 @@ public final class FfmNativeLibrary implements AutoCloseable {
         return api;
     }
 
-    public NativeEventDispatcher dispatcher() {
-        return dispatcher;
-    }
-
     public SymbolLookup lookup() {
         return lookup;
     }
 
     @Override
     public void close() {
-        if (!closed) {
-            closed = true;
-            arena.close();
+        if (!closed.compareAndSet(false, true)) {
+            return;
         }
+        arena.close();
     }
 
 }

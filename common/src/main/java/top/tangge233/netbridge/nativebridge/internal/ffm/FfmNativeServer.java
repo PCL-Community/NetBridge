@@ -12,7 +12,7 @@ public final class FfmNativeServer implements NativeServer {
     private final FfmNativeTransportBackend owner;
     private final long id;
     private final NativeTransportKind transport;
-    private final Set<NativeConnection> accepted = ConcurrentHashMap.newKeySet();
+    private final Set<FfmNativeConnection> acceptedChildren = ConcurrentHashMap.newKeySet();
 
     private volatile @Nullable NativeServerListener listener;
     private volatile boolean closed;
@@ -46,6 +46,7 @@ public final class FfmNativeServer implements NativeServer {
     @Override
     public void setListener(NativeServerListener listener) {
         this.listener = listener;
+        acceptedChildren.forEach(listener::onAccepted);
     }
 
     @Override
@@ -62,7 +63,7 @@ public final class FfmNativeServer implements NativeServer {
         } catch (RuntimeException e) {
             throw new NativeException("failed to stop native server " + id, e);
         } finally {
-            for (var conn : accepted) {
+            acceptedChildren.forEach(conn -> {
                 try {
                     conn.close();
                 } catch (RuntimeException e) {
@@ -72,8 +73,8 @@ public final class FfmNativeServer implements NativeServer {
                             e.getMessage()
                     );
                 }
-            }
-            accepted.clear();
+            });
+            acceptedChildren.clear();
             owner.unregisterServer(id);
         }
     }
@@ -84,12 +85,16 @@ public final class FfmNativeServer implements NativeServer {
         }
     }
 
-    void handleAccepted(NativeConnection connection) {
-        accepted.add(connection);
+    void handleAccepted(FfmNativeConnection connection) {
+        acceptedChildren.add(connection);
         var l = listener;
         if (l != null) {
             l.onAccepted(connection);
         }
+    }
+
+    void removeChild(FfmNativeConnection connection) {
+        acceptedChildren.remove(connection);
     }
 
     void handleStateChanged() {

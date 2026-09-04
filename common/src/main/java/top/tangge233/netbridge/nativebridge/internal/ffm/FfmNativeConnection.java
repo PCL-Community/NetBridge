@@ -13,6 +13,7 @@ public final class FfmNativeConnection implements NativeConnection {
 
     private final FfmNativeTransportBackend owner;
     private final long id;
+    private final @Nullable FfmNativeServer ownerServer;
     private final NativeTransportKind transport;
 
     private volatile NativeConnectionState state;
@@ -22,11 +23,13 @@ public final class FfmNativeConnection implements NativeConnection {
     FfmNativeConnection(
             FfmNativeTransportBackend owner,
             long id,
+            @Nullable FfmNativeServer ownerServer,
             NativeTransportKind transport,
             NativeConnectionState initialState
     ) {
         this.owner = owner;
         this.id = id;
+        this.ownerServer = ownerServer;
         this.transport = transport;
         this.state = initialState;
     }
@@ -198,6 +201,13 @@ public final class FfmNativeConnection implements NativeConnection {
             throw new NativeException("failed to close native connection " + id, e);
         } finally {
             owner.unregisterConnection(id);
+            releaseServerOwnership();
+        }
+    }
+
+    private void releaseServerOwnership() {
+        if (ownerServer != null) {
+            ownerServer.removeChild(this);
         }
     }
 

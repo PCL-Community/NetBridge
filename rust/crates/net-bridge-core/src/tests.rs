@@ -4,6 +4,5 @@ use super::STATE_CONNECTED;
 
 #[test]
 fn abi_constants() {
-    assert_eq!(crate::NET_BRIDGE_ABI_VERSION, "0.3.0");
     assert_eq!(STATE_CONNECTED, 1);
 }

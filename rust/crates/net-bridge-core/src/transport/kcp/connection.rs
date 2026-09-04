@@ -10,9 +10,10 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
 use super::fec_stream::FecStream;
-use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE};
+use crate::context::NativeContext;
+use crate::event::{NB_EVENT_DATA_AVAILABLE, NB_EVENT_WRITABLE};
 use crate::report_error;
-use crate::{Command, STATE_CLOSED, STATE_FAILED, guarded};
+use crate::{Command, STATE_CLOSED, STATE_FAILED};
 
 type KcpFec = FecStream<KcpStream>;
 
@@ -23,6 +24,7 @@ fn smux_config() -> Result<Config, String> {
         .map_err(|e| format!("smux config build failed: {e}"))
 }
 
+/// 终态事件经 `ctx.emit_terminal` 恰好一次；entry 为 tombstone 直到 Java release。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kcp_connection_with_sink(
     conn_id: u64,
@@ -31,24 +33,18 @@ pub async fn run_kcp_connection_with_sink(
     to_java_tx: mpsc::Sender<Bytes>,
     state: Arc<AtomicU32>,
     client_side: bool,
-    event_sink: Arc<dyn EventSink>,
-    cleanup: Box<dyn Fn(u64) + Send + Sync>,
+    ctx: Arc<NativeContext>,
 ) {
-    let Some(session) =
-        create_session(conn_id, fec, client_side, &state, &event_sink, &cleanup).await
-    else {
+    let write_blocked = ctx
+        .conns()
+        .get(&conn_id)
+        .map(|h| h.write_blocked.clone())
+        .unwrap_or_default();
+    let sink = Arc::clone(ctx.event_sink());
+    let Some(session) = create_session(conn_id, fec, client_side, &state, &ctx).await else {
         return;
     };
-    let Some(stream) = open_mc_stream(
-        conn_id,
-        &session,
-        client_side,
-        &state,
-        &event_sink,
-        &cleanup,
-    )
-    .await
-    else {
+    let Some(stream) = open_mc_stream(conn_id, &session, client_side, &state, &ctx).await else {
         return;
     };
 
@@ -56,24 +52,19 @@ pub async fn run_kcp_connection_with_sink(
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
     let done_guard = reader_done_tx.clone();
     let reader_state = state.clone();
-    let sink = Arc::clone(&event_sink);
+    let reader_sink = Arc::clone(&sink);
     let reader = tokio::spawn(async move {
-        let panicked = guarded("kcp reader task", async move {
-            reader_loop(
-                conn_id,
-                stream_r,
-                to_java_tx,
-                reader_state,
-                reader_done_tx,
-                sink,
-            )
-            .await;
-        })
+        reader_loop(
+            conn_id,
+            stream_r,
+            to_java_tx,
+            reader_state,
+            reader_done_tx,
+            reader_sink,
+        )
         .await;
-        if panicked {
-            let _ = done_guard.try_send(true);
-        }
     });
+    let _ = done_guard.clone();
 
     drive(
         conn_id,
@@ -82,12 +73,12 @@ pub async fn run_kcp_connection_with_sink(
         to_kcp_rx,
         &mut reader_done_rx,
         &state,
-        &event_sink,
+        &ctx,
+        &write_blocked,
     )
     .await;
 
     reader.abort();
-    cleanup(conn_id);
 }
 
 async fn create_session(
@@ -95,14 +86,11 @@ async fn create_session(
     fec: KcpFec,
     client_side: bool,
     state: &AtomicU32,
-    event_sink: &Arc<dyn EventSink>,
-    cleanup: &(dyn Fn(u64) + Send + Sync),
+    ctx: &Arc<NativeContext>,
 ) -> Option<Session> {
     let config = match smux_config() {
         Ok(config) => config,
-        Err(msg) => {
-            return request_fail(conn_id, state, Err(msg), event_sink, cleanup);
-        }
+        Err(msg) => return request_fail(conn_id, state, Err(msg), ctx),
     };
     let result = if client_side {
         Session::client(fec, config).await
@@ -113,8 +101,7 @@ async fn create_session(
         conn_id,
         state,
         result.map_err(|e| format!("smux session setup failed: {e}")),
-        event_sink,
-        cleanup,
+        ctx,
     )
 }
 
@@ -123,8 +110,7 @@ async fn open_mc_stream(
     session: &Session,
     client_side: bool,
     state: &AtomicU32,
-    event_sink: &Arc<dyn EventSink>,
-    cleanup: &(dyn Fn(u64) + Send + Sync),
+    ctx: &Arc<NativeContext>,
 ) -> Option<smux::Stream> {
     let result = if client_side {
         session.open_stream().await
@@ -135,8 +121,7 @@ async fn open_mc_stream(
         conn_id,
         state,
         result.map_err(|e| format!("smux stream setup failed: {e}")),
-        event_sink,
-        cleanup,
+        ctx,
     )
 }
 
@@ -144,21 +129,14 @@ fn request_fail<T>(
     conn_id: u64,
     state: &AtomicU32,
     result: Result<T, String>,
-    event_sink: &Arc<dyn EventSink>,
-    cleanup: &(dyn Fn(u64) + Send + Sync),
+    ctx: &Arc<NativeContext>,
 ) -> Option<T> {
     match result {
         Ok(value) => Some(value),
         Err(msg) => {
             report_error(format!("kcp conn {conn_id}: {msg}"));
             state.store(STATE_FAILED, Ordering::SeqCst);
-            event_sink.on_event(
-                NB_EVENT_CONNECTION_STATE,
-                conn_id,
-                crate::event::abi_connection_state(STATE_FAILED) as i64,
-                0,
-            );
-            cleanup(conn_id);
+            ctx.emit_terminal(conn_id);
             None
         }
     }
@@ -170,7 +148,7 @@ async fn reader_loop(
     to_java_tx: mpsc::Sender<Bytes>,
     state: Arc<AtomicU32>,
     done_tx: mpsc::Sender<bool>,
-    event_sink: Arc<dyn EventSink>,
+    event_sink: Arc<dyn crate::event::EventSink>,
 ) {
     let mut payload = BytesMut::with_capacity(64 * 1024);
     let clean = loop {
@@ -194,6 +172,7 @@ async fn reader_loop(
     let _ = done_tx.send(clean).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     conn_id: u64,
     mut stream_w: WriteHalf<smux::Stream>,
@@ -201,7 +180,8 @@ async fn drive(
     mut cmds: mpsc::Receiver<Command>,
     reader_done: &mut mpsc::Receiver<bool>,
     state: &AtomicU32,
-    event_sink: &Arc<dyn EventSink>,
+    ctx: &Arc<NativeContext>,
+    write_blocked: &Arc<std::sync::atomic::AtomicBool>,
 ) {
     loop {
         if state.load(Ordering::SeqCst) == STATE_CLOSED {
@@ -213,12 +193,7 @@ async fn drive(
             done = reader_done.recv() => {
                 if done == Some(false) {
                     state.store(STATE_FAILED, Ordering::SeqCst);
-                    event_sink.on_event(
-                        NB_EVENT_CONNECTION_STATE,
-                        conn_id,
-                        crate::event::abi_connection_state(STATE_FAILED) as i64,
-                        0,
-                    );
+                    ctx.emit_terminal(conn_id);
                 }
                 break;
             }
@@ -231,15 +206,13 @@ async fn drive(
                             } else {
                                 report_error(format!("kcp conn {conn_id}: write error: {e}"));
                                 state.store(STATE_FAILED, Ordering::SeqCst);
-                                event_sink.on_event(
-                                    NB_EVENT_CONNECTION_STATE,
-                                    conn_id,
-                                    crate::event::abi_connection_state(STATE_FAILED) as i64,
-                                    0,
-                                );
+                                ctx.emit_terminal(conn_id);
                                 true
                             }
                         } else {
+                            if write_blocked.swap(false, Ordering::SeqCst) {
+                                ctx.event_sink().on_event(NB_EVENT_WRITABLE, conn_id, 0, 0);
+                            }
                             false
                         }
                     }
@@ -254,12 +227,7 @@ async fn drive(
     }
     if state.load(Ordering::SeqCst) != STATE_FAILED {
         state.store(STATE_CLOSED, Ordering::SeqCst);
-        event_sink.on_event(
-            NB_EVENT_CONNECTION_STATE,
-            conn_id,
-            crate::event::abi_connection_state(STATE_CLOSED) as i64,
-            0,
-        );
+        ctx.emit_terminal(conn_id);
     }
     graceful_close(&mut stream_w, session).await;
 }

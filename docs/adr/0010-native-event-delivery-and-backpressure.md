@@ -31,8 +31,10 @@ FFM cutover（ADR-0009）后，Rust 侧 upcall 回调可以低开销地到达 Ja
    busy-spin。
 
 5. **ACCEPTED 驱动收养**。Rust accept 后注册连接并发出 `ACCEPTED(server_id,
-   conn_id)`；`ServerTransportManager` 经单线程 adopt 执行器交给
-   `NativeConnectionAdopter`，adopt 失败关闭连接，无裸 id 泄漏。
+   conn_id)`，语义跨 QUIC/KCP 一致（注册即可 adopt；后续失败走终态事件，无 zombie）。
+   `ServerTransportManager` 经 adopt 执行器交给 `NativeConnectionAdopter`；adoption 最终 handoff 到
+   Minecraft server 线程执行注册与连接列表修改；manager 关闭后 新到/排队 adoption 拒绝并关闭连接。adopt
+   失败关闭连接，无裸 id 泄漏。
 
 6. **连接状态事件携带 ABI 值**（internal+1，与 `connection_state` downcall 一致）；
    建连失败路径同样发出终态事件，connect promise 由事件完成，超时仅由
@@ -44,3 +46,14 @@ FFM cutover（ADR-0009）后，Rust 侧 upcall 回调可以低开销地到达 Ja
 - 事件路径的正确性由 fake backend（would-block→writable、accept、状态迁移）与 FFM 集成测试（QUIC/KCP
   loopback、回调风暴、重复 backend 生命周期）共同覆盖。
 - 若未来 benchmark 证明 upcall 频率本身成为瓶颈，才考虑 Rust 侧边沿触发优化； 不预先引入 ack 协议。
+
+## 增补（最终审计定稿）
+
+- **async panic guard**：任务统一经 `NativeContext::spawn_connection_task /
+  spawn_server_task` spawn，外层 await JoinHandle 捕获 poll 期间 panic（测试以 future 内主动 panic 验证
+  cleanup + 恰好一次终态事件）；散落手写 spawn+cleanup 禁止。
+- **early-event race**：连接 wrapper 注册前到达的事件由 setListener reconcile + tombstone 查询兜底；服务端
+  ACCEPTED 早到由 backend `pendingAccepted` 缓冲并在 startServer / setListener 回放——事件不丢失有确定性测试。
+- **client 编排异步化**：`ConnectionExecutor` 为非阻塞状态机（`DelegatingChannelFuture`
+  换绑 delegate），同步 `syncUninterruptibly` 重试循环删除；typed retryable 之外 直接回退 TCP。架构守卫禁止
+  client 包内 `syncUninterruptibly` 回归。

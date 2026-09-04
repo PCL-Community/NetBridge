@@ -168,6 +168,18 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
             if (Regex("static\\s+volatile").containsMatchIn(text) && rel !in runtimeAllowlist) {
                 failures.add("$rel: static volatile business state outside the composition root")
             }
+            if (rel.endsWith("channel/NativeChannel.java")
+                && text.contains("BACKPRESSURE_RETRY_MILLIS")
+            ) {
+                failures.add("$rel: polling backpressure fallback is forbidden (WRITABLE event only)")
+            }
+            if (rel.contains("/client/")
+                && text.contains("syncUninterruptibly")
+                && !rel.contains("Test")
+                && !rel.endsWith("DelegatingChannelFuture.java")
+            ) {
+                failures.add("$rel: client orchestration must not block the calling thread")
+            }
             if (Regex("static\\s+(final\\s+)?(ExecutorService|ScheduledExecutorService|ThreadLocal)").containsMatchIn(
                     text
                 )

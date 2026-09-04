@@ -2,7 +2,6 @@ package top.tangge233.netbridge.channel;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
-import io.netty.util.concurrent.ScheduledFuture;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
 
@@ -13,14 +12,12 @@ import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.jspecify.annotations.Nullable;
 
 public class NativeChannel extends AbstractChannel {
 
-    /** 单次 native 读写上限（与 Rust 侧 chunk 一致）。 */
     public static final int MAX_IO_BYTES = 65536;
 
     private static final ChannelMetadata METADATA = new ChannelMetadata(
@@ -29,7 +26,6 @@ public class NativeChannel extends AbstractChannel {
     );
     private static final int MAX_READS_PER_POLL = 16;
     private static final int MAX_DRAIN_ROUNDS = 4;
-    private static final long BACKPRESSURE_RETRY_MILLIS = 50L;
 
     private final NativeConnection connection;
     private final ChannelConfig config = new DefaultChannelConfig(this);
@@ -38,7 +34,6 @@ public class NativeChannel extends AbstractChannel {
     private final AtomicBoolean backpressured = new AtomicBoolean();
     private final AtomicReference<NativeConnectionState> nativeState =
             new AtomicReference<>(NativeConnectionState.CONNECTING);
-    private volatile @Nullable ScheduledFuture<?> backpressureRetry;
     private volatile boolean connected;
     private volatile boolean readRequested;
     private volatile @Nullable InetSocketAddress remoteAddress;
@@ -124,11 +119,6 @@ public class NativeChannel extends AbstractChannel {
             return;
         }
 
-        var retryTask = backpressureRetry;
-        backpressureRetry = null;
-        if (retryTask != null) {
-            retryTask.cancel(false);
-        }
         var p = connectPromise;
         connectPromise = null;
         if (p != null && !p.isDone()) {
@@ -167,9 +157,6 @@ public class NativeChannel extends AbstractChannel {
                 break;
             }
             written++;
-        }
-        if (in.current() != null && backpressured.get()) {
-            scheduleBackpressureRetry();
         }
     }
 
@@ -211,32 +198,6 @@ public class NativeChannel extends AbstractChannel {
         }
         in.remove();
         return 1;
-    }
-
-    private void scheduleBackpressureRetry() {
-        if (closed.get()) {
-            return;
-        }
-
-        var loop = eventLoop();
-        if (loop == null) {
-            return;
-        }
-
-        var retry = loop.schedule(
-                () -> {
-                    if (!closed.get() && backpressured.get()) {
-                        unsafe().flush();
-                    }
-                },
-                BACKPRESSURE_RETRY_MILLIS,
-                TimeUnit.MILLISECONDS
-        );
-        var previous = backpressureRetry;
-        if (previous != null) {
-            previous.cancel(false);
-        }
-        backpressureRetry = retry;
     }
 
     private NativeIoResult writeChunk(
@@ -461,7 +422,10 @@ public class NativeChannel extends AbstractChannel {
     }
 
     private int readInto(ByteBuf buf) {
-        var nio = buf.nioBuffer(buf.writerIndex(), buf.writableBytes());
+        var nio = buf.nioBuffer(
+                buf.writerIndex(),
+                buf.writableBytes()
+        );
         NativeIoResult res;
         if (nio != null && nio.isDirect()) {
             res = connection.read(nio);

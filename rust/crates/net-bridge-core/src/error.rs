@@ -67,6 +67,14 @@ pub enum BridgeError {
     #[error("connection closed")]
     ConnectionClosed,
 
+    /// 操作/启动超时（如 KCP listener 启动窗口）。
+    #[error("operation timed out")]
+    Timeout,
+
+    /// id 分配器即将回绕：context 必须失败，禁止复用 0。
+    #[error("object id space exhausted")]
+    IdOverflow,
+
     /// 迁移期逃生口：尚未类型化的消息（逐步收敛到具体变体）。
     #[error("{0}")]
     Other(String),

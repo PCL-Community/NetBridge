@@ -3,6 +3,7 @@ package top.tangge233.netbridge.nativebridge.internal.ffm;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.nativebridge.NativeEvent;
+import top.tangge233.netbridge.nativebridge.NativeException;
 
 import java.lang.foreign.*;
 import java.nio.charset.StandardCharsets;
@@ -15,9 +16,6 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Phase 4: FFM 架构 4 项核心 POC 验证与集成测试。
- */
 class FfmPocTest {
 
     private static Path nativeLibPath;
@@ -27,9 +25,6 @@ class FfmPocTest {
         nativeLibPath = FfmTestSupport.findNativeLibrary();
     }
 
-    /**
-     * POC 1: Java 25 SymbolLookup.libraryLookup 加载 Rust cdylib 并定位 bootstrap 符号。
-     */
     @Test
     void testPoc1SymbolLookupLoadsCdylib() {
         try (var arena = Arena.ofConfined()) {
@@ -43,9 +38,6 @@ class FfmPocTest {
         }
     }
 
-    /**
-     * POC 2: netbridge_get_api bootstrap 调用与 NbApiV1 函数表解析与版本协商。
-     */
     @Test
     void testPoc2GetApiBootstrap() throws Throwable {
         try (var arena = Arena.ofShared()) {
@@ -57,7 +49,6 @@ class FfmPocTest {
                     FfmApiLayouts.GET_API_DESC
             );
 
-            // 1. 协商成功
             var tablePtr = arena.allocate(ValueLayout.ADDRESS);
             var status = (int) getApiHandle.invokeExact(1, 0, tablePtr);
             assertEquals(FfmStatus.NB_OK, status);
@@ -81,20 +72,15 @@ class FfmPocTest {
             assertNotNull(api.connectionRead());
             assertNotNull(api.serverStart());
 
-            // 2. 协商失败（Major 不匹配）
             var badPtr = arena.allocate(ValueLayout.ADDRESS);
             var badMajorStatus = (int) getApiHandle.invokeExact(2, 0, badPtr);
             assertEquals(FfmStatus.NB_ABI_MISMATCH, badMajorStatus);
 
-            // 3. 协商失败（Minor 过高）
             var badMinorStatus = (int) getApiHandle.invokeExact(1, 99, badPtr);
             assertEquals(FfmStatus.NB_ABI_MISMATCH, badMinorStatus);
         }
     }
 
-    /**
-     * POC 3: 堆外 direct ByteBuffer / MemorySegment 数据面零中间层单次拷贝读写往返。
-     */
     @Test
     void testPoc3MemorySegmentReadWriteRoundtrip() throws Exception {
         try (
@@ -105,7 +91,7 @@ class FfmPocTest {
             var acceptedConnLatch = new CountDownLatch(1);
             var serverConnHolder = new long[1];
 
-            lib.dispatcher().addListener(event -> {
+            ctx.dispatcher().addListener(event -> {
                 if (event.eventKind() == NativeEvent.KIND_ACCEPTED) {
                     serverConnHolder[0] = event.arg0();
                     acceptedConnLatch.countDown();
@@ -130,7 +116,6 @@ class FfmPocTest {
             );
             assertTrue(clientId > 0);
 
-            // 等待连接就绪和服务端收到 accept
             var deadline = Instant.now().plus(Duration.ofSeconds(5));
             while (Instant.now().isBefore(deadline)) {
                 if (ctx.connectionState(clientId) == 2) { // NB_CONNECTION_CONNECTED = 2
@@ -147,7 +132,6 @@ class FfmPocTest {
             var serverConnId = serverConnHolder[0];
             assertTrue(serverConnId > 0);
 
-            // 1. Client -> Server 数据传输
             var clientMsg = "Hello server via Java 25 MemorySegment!".getBytes(StandardCharsets.UTF_8);
             try (var arena = Arena.ofConfined()) {
                 var srcSeg = arena.allocateFrom(
@@ -181,7 +165,6 @@ class FfmPocTest {
                 assertArrayEquals(clientMsg, readBytes);
             }
 
-            // 2. Server -> Client 数据回传
             var serverReply = "Pong from server via MemorySegment!".getBytes(StandardCharsets.UTF_8);
             try (var arena = Arena.ofConfined()) {
                 var replySeg = arena.allocateFrom(
@@ -223,10 +206,6 @@ class FfmPocTest {
         }
     }
 
-    /**
-     * POC 4: Rust Tokio worker 线程 -> C Callback -> FFM Upcall Stub -> Java NativeEventDispatcher
-     * 分发。
-     */
     @Test
     void testPoc4RustTokioThreadUpcallToDispatcher() throws Exception {
         try (
@@ -237,7 +216,7 @@ class FfmPocTest {
             var receivedEvents = new CopyOnWriteArrayList<NativeEvent>();
             var eventLatch = new CountDownLatch(1);
 
-            lib.dispatcher().addListener(event -> {
+            ctx.dispatcher().addListener(event -> {
                 receivedEvents.add(event);
                 if (event.eventKind() == NativeEvent.KIND_ACCEPTED
                         || event.eventKind() == NativeEvent.KIND_CONNECTION_STATE) {
@@ -273,9 +252,6 @@ class FfmPocTest {
         }
     }
 
-    /**
-     * 验证 Context 完整生命周期（创建、建连、优雅 shutdown、destroy）。
-     */
     @Test
     void testContextLifecycleAndShutdown() {
         try (var lib = FfmNativeLibrary.load(nativeLibPath)) {
@@ -299,7 +275,7 @@ class FfmPocTest {
             ctx.destroy();
 
             assertThrows(
-                    IllegalStateException.class,
+                    NativeException.class,
                     () -> ctx.connect(
                             1,
                             "127.0.0.1",

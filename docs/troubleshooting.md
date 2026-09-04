@@ -38,6 +38,9 @@
 
 ## 开发者
 
+- 缓存目录损坏/权限：错误码 `CACHE_UNWRITABLE`；可用
+  `-Dnetbridge.native.cache.dir=<dir>` 重定向缓存根。损坏条目自动复验并原子替换。
+- 平台不支持：错误码 `UNSUPPORTED_PLATFORM`（附 normalized os/arch）。
 - 本地调试 native：`-Dnetbridge.native.path=/abs/path/libnet_bridge_native.so`
   （优先于打包资源；生产无 `java.library.path` 回退）。
 - 构建验证：`./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest`。

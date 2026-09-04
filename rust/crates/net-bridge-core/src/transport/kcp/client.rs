@@ -14,9 +14,7 @@ use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
 use crate::socket_util;
-use crate::{
-    Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded,
-};
+use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED};
 
 /// 经 NativeContext 发起 KCP 客户端连接。
 pub fn connect_in_context(
@@ -28,7 +26,9 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let conn_id = ctx.allocate_id();
+    let Ok(conn_id) = ctx.allocate_id() else {
+        return Err(BridgeError::IdOverflow);
+    };
     ctx.conns().insert(
         conn_id,
         ConnHandle::new(
@@ -38,72 +38,42 @@ pub fn connect_in_context(
             None,
             None,
             true,
-            true,
             None,
         ),
     );
     let host = host.to_string();
-    let ctx_clone = Arc::clone(ctx);
-    let ctx_cleanup = Arc::clone(ctx);
-    let connected_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ok_task = Arc::clone(&connected_ok);
-    let state_outer = Arc::clone(&state);
-    ctx.handle().spawn(async move {
-        let ctx_task = Arc::clone(&ctx_clone);
-        let panicked = guarded("kcp connect task in context", async move {
-            let Some(addr) = resolve_host(&ctx_task, conn_id, &state, &host, port).await else {
-                return;
-            };
-            let Some(udp) = client_udp(&ctx_task, conn_id, &state, addr) else {
-                return;
-            };
-            let Some(stream) = establish_kcp(&ctx_task, conn_id, &state, addr, udp, profile).await
-            else {
-                return;
-            };
-            ok_task.store(true, Ordering::SeqCst);
-            if state.load(Ordering::SeqCst) != STATE_CLOSED {
-                state.store(STATE_CONNECTED, Ordering::SeqCst);
-                ctx_clone.event_sink().on_event(
-                    crate::event::NB_EVENT_CONNECTION_STATE,
-                    conn_id,
-                    crate::event::abi_connection_state(STATE_CONNECTED) as i64,
-                    0,
-                );
-            }
-            super::connection::run_kcp_connection_with_sink(
-                conn_id,
-                FecStream::new(stream),
-                to_transport_rx,
-                to_java_tx,
-                state,
-                true,
-                ctx_clone.event_sink().clone(),
-                {
-                    let c = Arc::clone(&ctx_clone);
-                    Box::new(move |id| {
-                        c.remove_conn(id);
-                    })
-                },
-            )
-            .await;
-        })
-        .await;
-        if panicked {
-            ctx_cleanup.remove_conn(conn_id);
-        } else if !connected_ok.load(Ordering::SeqCst) {
-            let st = state_outer.load(Ordering::SeqCst);
-            ctx_cleanup.event_sink().on_event(
+    let ctx_task = Arc::clone(ctx);
+    ctx.spawn_connection_task("kcp connect task in context", conn_id, async move {
+        let Some(addr) = resolve_host(&ctx_task, conn_id, &state, &host, port).await else {
+            return;
+        };
+        let Some(udp) = client_udp(&ctx_task, conn_id, &state, addr) else {
+            return;
+        };
+        let Some(stream) = establish_kcp(&ctx_task, conn_id, &state, addr, udp, profile).await
+        else {
+            return;
+        };
+        if state.load(Ordering::SeqCst) != STATE_CLOSED {
+            state.store(STATE_CONNECTED, Ordering::SeqCst);
+            ctx_task.event_sink().on_event(
                 crate::event::NB_EVENT_CONNECTION_STATE,
                 conn_id,
-                crate::event::abi_connection_state(if st == STATE_FAILED {
-                    STATE_FAILED
-                } else {
-                    STATE_CLOSED
-                }) as i64,
+                crate::event::abi_connection_state(STATE_CONNECTED) as i64,
                 0,
             );
         }
+        ctx_task.set_conn_remote_addr(conn_id, addr);
+        super::connection::run_kcp_connection_with_sink(
+            conn_id,
+            FecStream::new(stream),
+            to_transport_rx,
+            to_java_tx,
+            state,
+            true,
+            Arc::clone(&ctx_task),
+        )
+        .await;
     });
     Ok(conn_id)
 }
@@ -224,7 +194,7 @@ fn fail(
     state: &Arc<AtomicU32>,
     err: BridgeError,
 ) {
-    ctx.remove_conn(conn_id);
     state.store(STATE_FAILED, Ordering::SeqCst);
+    ctx.emit_terminal(conn_id);
     report_error(err.message());
 }

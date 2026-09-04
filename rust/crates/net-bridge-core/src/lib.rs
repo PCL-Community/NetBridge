@@ -17,16 +17,12 @@ pub use transport::TransportKind;
 
 use std::any::Any;
 use std::collections::VecDeque;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
-
-pub const NET_BRIDGE_ABI_VERSION: &str = "0.3.0";
 
 /// 发往传输写任务的通用控制命令。
 #[derive(Debug)]
@@ -54,15 +50,17 @@ pub struct ConnHandle {
     /// 连接期即可写入：KCP 客户端握手未完成时允许写入（命令先入 channel，
     /// 握手完成后立即下发；kcp-rs 内建握手，不依赖首帧判定）。QUIC 客户端为 false。
     pub early_write: bool,
-    /// 服务端连接是否已被 Java 通过 acceptConnections 取走。
-    pub reported: AtomicBool,
-    /// 服务端连接真实对端地址（Java 侧 ban/限速等 IP 管控）；
-    /// 客户端连接在 DNS 解析前注册，此处为 None。
+    /// 写队列满 → 传输任务消费出空间后清零并 edge-trigger 发 WRITABLE。
+    pub write_blocked: Arc<AtomicBool>,
+    /// 终态事件（FAILED/CLOSED）只发一次的闸。
+    pub terminal_sent: AtomicBool,
+    /// 连接真实对端地址（Java 侧 ban/限速等 IP 管控）。
     pub remote_addr: Option<SocketAddr>,
 }
 
 impl ConnHandle {
     /// 构造句柄：读侧 channel 与空残留队列包装进共享锁。
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<AtomicU32>,
@@ -71,7 +69,6 @@ impl ConnHandle {
         server_id: Option<u64>,
         server_count: Option<Arc<AtomicUsize>>,
         early_write: bool,
-        reported: bool,
         remote_addr: Option<SocketAddr>,
     ) -> Self {
         Self {
@@ -81,7 +78,8 @@ impl ConnHandle {
             server_id,
             server_count,
             early_write,
-            reported: AtomicBool::new(reported),
+            write_blocked: Arc::new(AtomicBool::new(false)),
+            terminal_sent: AtomicBool::new(false),
             remote_addr,
         }
     }
@@ -118,22 +116,6 @@ pub(crate) fn try_admit(count: &AtomicUsize, max: usize) -> bool {
         return false;
     }
     true
-}
-
-/// 任务 panic 防护：catch_unwind 包裹 future，panic 记 stderr 日志并返回 true。
-/// 调用方在返回 true 时执行连接/服务端句柄清理——panic 任务不能留下注册表残留。
-pub(crate) async fn guarded<F: Future<Output = ()>>(what: &str, fut: F) -> bool {
-    let result = catch_unwind(AssertUnwindSafe(move || fut));
-    match result {
-        Ok(f) => {
-            f.await;
-            false
-        }
-        Err(payload) => {
-            report_error(format!("{what} panicked: {}", describe_panic(&payload)));
-            true
-        }
-    }
 }
 
 /// 提取 panic payload 的可读信息；非字符串 payload 记占位。

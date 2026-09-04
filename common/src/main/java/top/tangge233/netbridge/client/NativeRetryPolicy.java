@@ -1,8 +1,9 @@
 package top.tangge233.netbridge.client;
 
-/**
- * 加速尝试重试策略。
- */
+import java.io.IOException;
+import java.util.concurrent.TimeoutException;
+import org.jspecify.annotations.Nullable;
+
 public record NativeRetryPolicy(
         int maxAttempts,
         long firstAttemptTimeoutMillis,
@@ -25,6 +26,17 @@ public record NativeRetryPolicy(
         return attempt <= 1
                 ? firstAttemptTimeoutMillis
                 : subsequentAttemptTimeoutMillis;
+    }
+
+    public long retryBackoffMillisForAttempt(int attempt) {
+        return attempt <= 1
+                ? 0L
+                : 100L;
+    }
+
+    public boolean isRetryable(@Nullable Throwable cause) {
+        return cause == null ||
+                (cause instanceof IOException || cause instanceof TimeoutException);
     }
 
 }

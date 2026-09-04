@@ -25,7 +25,7 @@ public final class ServerTransportManager {
     private @Nullable NativeServer quic;
     private @Nullable NativeServer kcp;
     private @Nullable NetworksAbility announcement;
-    private boolean closed;
+    private volatile boolean closed;
 
     public ServerTransportManager(
             NativeTransportBackend backend,
@@ -66,7 +66,7 @@ public final class ServerTransportManager {
             }
             collectAnnouncement(entries, "kcp", resolved.kcp(), k);
         } catch (RuntimeException e) {
-            for (var s : started) {
+            started.forEach(s -> {
                 try {
                     s.close();
                 } catch (RuntimeException ce) {
@@ -75,7 +75,7 @@ public final class ServerTransportManager {
                             ce.getMessage()
                     );
                 }
-            }
+            });
             quic = null;
             kcp = null;
             NetBridge.LOGGER.error("Server transport start failed: {}", e.getMessage());
@@ -164,7 +164,9 @@ public final class ServerTransportManager {
         );
     }
 
-    private static NativeConnectRequest.KcpProfileValue toKcpProfile(@Nullable KcpProfile profile) {
+    private static NativeConnectRequest.KcpProfileValue toKcpProfile(
+            @Nullable KcpProfile profile
+    ) {
         return profile == KcpProfile.AGGRESSIVE
                 ? NativeConnectRequest.KcpProfileValue.AGGRESSIVE
                 : NativeConnectRequest.KcpProfileValue.BALANCED;
@@ -172,6 +174,18 @@ public final class ServerTransportManager {
 
     private void dispatch(NativeConnection connection) {
         adoptExecutor.execute(() -> {
+            if (closed) {
+                try {
+                    connection.close();
+                } catch (RuntimeException e) {
+                    NetBridge.LOGGER.warn(
+                            "Failed to close connection after manager close: {}",
+                            connection.id()
+                    );
+                }
+                return;
+            }
+
             var handler = adopter;
             if (handler == null) {
                 NetBridge.LOGGER.warn(
@@ -189,6 +203,7 @@ public final class ServerTransportManager {
                 }
                 return;
             }
+
             try {
                 handler.adopt(connection);
             } catch (Throwable t) {
@@ -217,6 +232,7 @@ public final class ServerTransportManager {
 
         closed = true;
         announcement = null;
+
         if (quic != null) {
             try {
                 quic.close();
@@ -225,6 +241,7 @@ public final class ServerTransportManager {
             }
             quic = null;
         }
+
         if (kcp != null) {
             try {
                 kcp.close();
@@ -233,6 +250,7 @@ public final class ServerTransportManager {
             }
             kcp = null;
         }
+
         NetBridge.LOGGER.info("Server transport manager stopped");
     }
 

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{BridgeError, Transport};
 use crate::socket_util;
-use crate::{STATE_FAILED, ServerHandle, TransportEndpoint, guarded, try_admit};
+use crate::{ServerHandle, TransportEndpoint, try_admit};
 
 /// 经 NativeContext 启动服务端 QUIC acceptor。
 pub fn start_server_in_context(
@@ -45,7 +45,7 @@ pub fn start_server_in_context(
         })?
         .port();
 
-    let server_id = ctx.allocate_id();
+    let server_id = ctx.allocate_id()?;
     let conn_count = Arc::new(AtomicUsize::new(0));
     let accept_endpoint = endpoint.clone();
     let accept_counter = Arc::clone(&conn_count);
@@ -60,32 +60,25 @@ pub fn start_server_in_context(
     );
 
     let ctx_clone = Arc::clone(ctx);
-    let ctx_cleanup = Arc::clone(ctx);
-    ctx.handle().spawn(async move {
-        let panicked = guarded("quic accept loop in context", async move {
-            loop {
-                let incoming = match accept_endpoint.accept().await {
-                    Some(incoming) => incoming,
-                    None => break,
-                };
-                if accept_counter.load(Ordering::Relaxed) >= max_connections {
-                    drop(incoming);
-                    continue;
-                }
-                let conn_counter = Arc::clone(&accept_counter);
-                let c = Arc::clone(&ctx_clone);
-                c.handle().spawn(serve_incoming_in_context(
-                    c.clone(),
-                    server_id,
-                    incoming,
-                    conn_counter,
-                    max_connections,
-                ));
+    ctx.spawn_server_task("quic accept loop in context", server_id, async move {
+        loop {
+            let incoming = match accept_endpoint.accept().await {
+                Some(incoming) => incoming,
+                None => break,
+            };
+            if accept_counter.load(Ordering::Relaxed) >= max_connections {
+                drop(incoming);
+                continue;
             }
-        })
-        .await;
-        if panicked {
-            ctx_cleanup.servers_map().remove(&server_id);
+            let conn_counter = Arc::clone(&accept_counter);
+            let c = Arc::clone(&ctx_clone);
+            c.handle().spawn(serve_incoming_in_context(
+                c.clone(),
+                server_id,
+                incoming,
+                conn_counter,
+                max_connections,
+            ));
         }
     });
     Ok(server_id)
@@ -102,13 +95,17 @@ async fn serve_incoming_in_context(
     let Ok(conn) = incoming.await else {
         return;
     };
+    // accept_bi 完成才登记 + 发 ACCEPTED：Java 收到时连接已 fully ready，
+    // 之后任何失败都走终态 tombstone，而不是先 adopt 再失败。
     if !try_admit(&conn_counter, max_connections) {
         return;
     }
     let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
     let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-    let conn_id = ctx.allocate_id();
+    let Ok(conn_id) = ctx.allocate_id() else {
+        return;
+    };
     ctx.conns().insert(
         conn_id,
         crate::ConnHandle::new(
@@ -118,11 +115,12 @@ async fn serve_incoming_in_context(
             Some(server_id),
             Some(conn_counter),
             false,
-            false,
             Some(peer),
         ),
     );
-    // 触发 ACCEPTED 事件
+    ctx.set_conn_remote_addr(conn_id, peer);
+    // ACCEPTED = 已注册、可立即 adopt（与 KCP 语义一致）；
+    // accept_bi 之前失败同样发出保证的终态事件（tombstone 模型），不会产生 zombie。
     ctx.event_sink().on_event(
         crate::event::NB_EVENT_ACCEPTED,
         server_id,
@@ -132,8 +130,9 @@ async fn serve_incoming_in_context(
 
     match conn.accept_bi().await {
         Ok((send, recv)) => {
-            let ctx_c = Arc::clone(&ctx);
-            let panicked = guarded("quic connection task in context", async move {
+            ctx.spawn_connection_task(
+                "quic connection task in context",
+                conn_id,
                 super::connection::run_connection_with_sink(
                     conn_id,
                     conn,
@@ -143,24 +142,13 @@ async fn serve_incoming_in_context(
                     to_java_tx,
                     to_transport_tx,
                     state,
-                    ctx_c.event_sink().clone(),
-                    {
-                        let c = Arc::clone(&ctx_c);
-                        Box::new(move |id| {
-                            c.remove_conn(id);
-                        })
-                    },
-                )
-                .await;
-            })
-            .await;
-            if panicked {
-                ctx.remove_conn(conn_id);
-            }
+                    Arc::clone(&ctx),
+                ),
+            );
         }
         Err(_) => {
-            state.store(STATE_FAILED, Ordering::SeqCst);
-            ctx.remove_conn(conn_id);
+            state.store(crate::STATE_FAILED, Ordering::SeqCst);
+            ctx.emit_terminal(conn_id);
         }
     }
 }

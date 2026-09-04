@@ -18,6 +18,9 @@ use crate::{
     TransportEndpoint,
 };
 
+/// 生产 KCP listener 启动窗口。
+pub const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub const CONTEXT_STATE_RUNNING: u8 = 0;
 pub const CONTEXT_STATE_SHUTTING_DOWN: u8 = 1;
 pub const CONTEXT_STATE_CLOSED: u8 = 2;
@@ -72,8 +75,13 @@ impl NativeContext {
         self.state() == CONTEXT_STATE_RUNNING
     }
 
-    pub fn allocate_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
+    /// 分配永不复用、永不产生的 id；回绕即 context 级 fatal。
+    pub fn allocate_id(&self) -> Result<u64, BridgeError> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        if id == 0 {
+            return Err(BridgeError::IdOverflow);
+        }
+        Ok(id)
     }
 
     pub fn event_sink(&self) -> &Arc<dyn EventSink> {
@@ -107,19 +115,107 @@ impl NativeContext {
         self.connections.get(&conn).and_then(|h| h.remote_addr)
     }
 
+    /// Java 侧 release：发送 Close 并移除注册表条目（连接 wrapper 是 entry 的 owner）。
     pub fn close_connection(&self, conn: u64) -> bool {
         let Some(handle) = self.connections.get(&conn) else {
             return false;
         };
-        let state = handle.state.clone();
+        handle.state.store(STATE_CLOSED, Ordering::SeqCst);
+        handle.terminal_sent.store(true, Ordering::SeqCst);
         let to_transport = handle.to_transport.clone();
         drop(handle);
-        let was = state.swap(STATE_CLOSED, Ordering::SeqCst);
         let ok = to_transport.try_send(Command::Close).is_ok();
-        if was == STATE_FAILED || was == crate::STATE_CONNECTING {
-            self.remove_conn(conn);
-        }
+        self.remove_conn(conn);
         ok
+    }
+
+    /// 终态事件（FAILED/CLOSED）恰好一次；entry 保留为 tombstone 直到 Java release。
+    pub(crate) fn emit_terminal(&self, conn_id: u64) {
+        let Some(handle) = self.connections.get(&conn_id) else {
+            return;
+        };
+        if handle.terminal_sent.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let state = handle.state.load(Ordering::SeqCst);
+        drop(handle);
+        self.event_sink().on_event(
+            crate::event::NB_EVENT_CONNECTION_STATE,
+            conn_id,
+            crate::event::abi_connection_state(state) as i64,
+            0,
+        );
+    }
+
+    /// 终态落账（tombstone 保留）+ 恰好一次的终态事件。
+    pub(crate) fn fail_connection(&self, conn_id: u64) {
+        if let Some(handle) = self.connections.get(&conn_id) {
+            handle.state.store(STATE_FAILED, Ordering::SeqCst);
+        }
+        self.emit_terminal(conn_id);
+    }
+
+    pub(crate) fn set_conn_remote_addr(&self, conn_id: u64, addr: SocketAddr) {
+        if let Some(mut handle) = self.connections.get_mut(&conn_id) {
+            handle.remote_addr = Some(addr);
+        }
+    }
+
+    /// panic-in-poll 防护：真实捕获 future poll 期间的 panic。
+    /// 连接任务 panic → 终态落账 + 恰好一次事件；tombstone 保留待 Java release。
+    pub(crate) fn spawn_connection_task<F>(
+        self: &Arc<Self>,
+        what: &'static str,
+        conn_id: u64,
+        fut: F,
+    ) where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let ctx = self.clone_for_task();
+        let outer = self.handle.clone();
+        let inner_handle = self.handle.clone();
+        outer.spawn(async move {
+            let inner = inner_handle.spawn(fut);
+            if let Err(e) = inner.await
+                && e.is_panic()
+            {
+                let payload = e.into_panic();
+                crate::report_error(format!(
+                    "{what} panicked: {}",
+                    crate::describe_panic(&payload)
+                ));
+                drop(payload);
+                ctx.fail_connection(conn_id);
+            }
+        });
+    }
+
+    /// 服务端任务 panic → 移除 server entry（Java 持 id，可经 serverStop 识别失败）。
+    pub(crate) fn spawn_server_task<F>(self: &Arc<Self>, what: &'static str, server_id: u64, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let ctx = self.clone_for_task();
+        let outer = self.handle.clone();
+        let inner_handle = self.handle.clone();
+        outer.spawn(async move {
+            let inner = inner_handle.spawn(fut);
+            if let Err(e) = inner.await
+                && e.is_panic()
+            {
+                let payload = e.into_panic();
+                crate::report_error(format!(
+                    "{what} panicked: {}",
+                    crate::describe_panic(&payload)
+                ));
+                drop(payload);
+                ctx.servers.remove(&server_id);
+            }
+        });
+    }
+
+    fn clone_for_task(self: &Arc<Self>) -> Arc<Self> {
+        Arc::clone(self)
     }
 
     pub fn write_chunk(&self, conn: u64, data: Bytes) -> Result<usize, BridgeError> {
@@ -131,6 +227,7 @@ impl NativeContext {
             return Err(BridgeError::NoSuchConnection);
         };
         let writable = handle.state.load(Ordering::SeqCst) == STATE_CONNECTED || handle.early_write;
+        let write_blocked = Arc::clone(&handle.write_blocked);
         let to_transport = handle.to_transport.clone();
         drop(handle);
         if !writable {
@@ -138,7 +235,10 @@ impl NativeContext {
         }
         match to_transport.try_send(Command::Write(data)) {
             Ok(()) => Ok(len),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(0),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                write_blocked.store(true, Ordering::SeqCst);
+                Ok(0)
+            }
             Err(_) => Err(BridgeError::ConnectionClosed),
         }
     }
@@ -218,16 +318,6 @@ impl NativeContext {
         true
     }
 
-    pub fn accept_connections(&self, server: u64) -> Vec<u64> {
-        let mut out = Vec::new();
-        for e in self.connections.iter_mut() {
-            if e.server_id == Some(server) && !e.reported.swap(true, Ordering::SeqCst) {
-                out.push(*e.key());
-            }
-        }
-        out
-    }
-
     pub fn connect(
         self: &Arc<Self>,
         kind: TransportKind,
@@ -267,6 +357,7 @@ impl NativeContext {
                 max_connections,
                 bind,
                 profile,
+                STARTUP_TIMEOUT,
             ),
         }
     }
@@ -319,7 +410,8 @@ impl NativeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
+    use std::time::Instant;
 
     struct TestEventSink {
         event_count: AtomicUsize,
@@ -328,6 +420,38 @@ mod tests {
     impl EventSink for TestEventSink {
         fn on_event(&self, _event_kind: u32, _object_id: u64, _arg0: i64, _arg1: i64) {
             self.event_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct RecordingSink(std::sync::Mutex<Vec<(u32, u64, i64, i64)>>);
+
+    impl EventSink for RecordingSink {
+        fn on_event(&self, kind: u32, object_id: u64, arg0: i64, arg1: i64) {
+            self.0.lock().unwrap().push((kind, object_id, arg0, arg1));
+        }
+    }
+
+    fn recording_ctx() -> (Arc<NativeContext>, Arc<RecordingSink>) {
+        let sink = Arc::new(RecordingSink(std::sync::Mutex::new(Vec::new())));
+        let ctx = NativeContext::new(2, Some(sink.clone())).expect("context");
+        (ctx, sink)
+    }
+
+    fn wait_accepted(sink: &RecordingSink, server: u64) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let hit = sink
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(k, o, _, _)| *k == crate::event::NB_EVENT_ACCEPTED && *o == server)
+                .map(|(_, _, a, _)| *a as u64);
+            if let Some(conn) = hit {
+                return conn;
+            }
+            assert!(Instant::now() < deadline, "accept timeout");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -368,7 +492,7 @@ mod tests {
     #[test]
     fn context_repeated_lifecycle_cycles_no_leak() {
         for cycle in 0..8u32 {
-            let ctx = NativeContext::new(2, None).expect("create context");
+            let (ctx, sink) = recording_ctx();
             let server = ctx
                 .start_server(TransportKind::Quic, 0, 16, None, KcpProfile::Balanced)
                 .expect("start server");
@@ -390,20 +514,7 @@ mod tests {
                 "cycle {cycle}: client not connected"
             );
 
-            let accept_deadline = std::time::Instant::now() + Duration::from_secs(5);
-            let accepted = loop {
-                let a = ctx.accept_connections(server);
-                if !a.is_empty() {
-                    break a;
-                }
-                assert!(
-                    std::time::Instant::now() < accept_deadline,
-                    "cycle {cycle}: accept timeout"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            };
-            assert_eq!(accepted.len(), 1);
-            let server_conn = accepted[0];
+            let server_conn = wait_accepted(&sink, server);
 
             let payload = format!("cycle-{cycle}-payload").into_bytes();
             assert_eq!(
@@ -435,5 +546,106 @@ mod tests {
                 "cycle {cycle}: leaked servers"
             );
         }
+    }
+
+    #[test]
+    fn id_overflow_is_fatal_not_wrap() {
+        let ctx = NativeContext::new(1, None).expect("context");
+        ctx.next_id.store(u64::MAX - 1, Ordering::SeqCst);
+        assert_eq!(ctx.allocate_id().expect("first"), u64::MAX - 1);
+        assert_eq!(ctx.allocate_id().expect("second"), u64::MAX);
+        assert!(matches!(ctx.allocate_id(), Err(BridgeError::IdOverflow)));
+    }
+
+    #[test]
+    fn panic_in_poll_cleans_up_and_emits_terminal_once() {
+        let (ctx, sink) = recording_ctx();
+        let state = Arc::new(AtomicU32::new(STATE_CONNECTED));
+        ctx.conns().insert(
+            7,
+            ConnHandle::new(
+                state.clone(),
+                {
+                    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+                    rx
+                },
+                {
+                    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                    tx
+                },
+                None,
+                None,
+                false,
+                None,
+            ),
+        );
+        ctx.spawn_connection_task("panic probe", 7, async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            panic!("boom in poll");
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if sink
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(k, o, _, _)| *k == crate::event::NB_EVENT_CONNECTION_STATE && *o == 7)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "panic 未产生终态事件");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ctx.connection_state(7), Some(STATE_FAILED));
+        assert!(ctx.conns().contains_key(&7), "tombstone 保留待 release");
+        let events = sink.0.lock().unwrap().len();
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(sink.0.lock().unwrap().len(), events, "终态事件必须恰好一次");
+        ctx.close_connection(7);
+        assert_eq!(ctx.connection_state(7), None);
+    }
+
+    #[test]
+    fn kcp_startup_timeout_rolls_back_no_orphan() {
+        let ctx = NativeContext::new(1, None).expect("context");
+        let result = crate::transport::kcp::start_server_in_context(
+            &ctx,
+            0,
+            16,
+            None,
+            KcpProfile::Balanced,
+            Duration::ZERO,
+        );
+        assert!(result.is_err(), "ZERO 超时必须失败");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            ctx.servers_map().is_empty(),
+            "启动超时不得留下 orphan server: {:?}",
+            ctx.servers_map()
+                .iter()
+                .map(|e| *e.key())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn client_remote_addr_recorded_after_connect() {
+        let ctx = NativeContext::new(2, None).expect("context");
+        let server = ctx
+            .start_server(TransportKind::Quic, 0, 8, None, KcpProfile::Balanced)
+            .expect("server");
+        let port = ctx.server_port(server).expect("port");
+        let client = ctx
+            .connect(TransportKind::Quic, "127.0.0.1", port, KcpProfile::Balanced)
+            .expect("client");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ctx.connection_state(client) != Some(STATE_CONNECTED) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let remote = ctx
+            .connection_remote_addr(client)
+            .expect("client remote addr 必须在握手成功后记录");
+        assert!(remote.port() > 0);
     }
 }
