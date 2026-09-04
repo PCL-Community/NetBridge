@@ -1,4 +1,4 @@
-package top.tangge233.netbridge.fabric.mc;
+package top.tangge233.netbridge.mc;
 
 import io.netty.channel.*;
 import io.netty.channel.epoll.Epoll;

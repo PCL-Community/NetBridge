@@ -1,4 +1,4 @@
-package top.tangge233.netbridge.neoforge.mc;
+package top.tangge233.netbridge.mc;
 
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.timeout.ReadTimeoutHandler;

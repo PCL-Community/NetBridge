@@ -8,6 +8,10 @@ dependencies {
     implementation(libs.mixin)
 }
 
+sourceSets.named("main") {
+    java.srcDir(rootProject.layout.projectDirectory.dir("minecraft/src/main/java"))
+}
+
 tasks.named<ProcessResources>("processResources") {
     inputs.property("version", project.version)
     filesMatching("META-INF/neoforge.mods.toml") {

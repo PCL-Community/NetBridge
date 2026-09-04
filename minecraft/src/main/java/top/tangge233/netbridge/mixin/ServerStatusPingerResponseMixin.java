@@ -1,4 +1,4 @@
-package top.tangge233.netbridge.fabric.mixin;
+package top.tangge233.netbridge.mixin;
 
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.multiplayer.ServerData;

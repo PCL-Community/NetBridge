@@ -28,82 +28,6 @@ tasks.register<BuildNativeLibrary>("buildCdylib") {
     outputDir.set(layout.buildDirectory.dir("native"))
 }
 
-val syncedCopies = listOf(
-    listOf(
-        "mc/NativeClientTransport.java",
-        "mc/NativeClientTransport.java"
-    ),
-    listOf(
-        "mc/NativeServerTransport.java",
-        "mc/NativeServerTransport.java"
-    ),
-    listOf(
-        "mixin/ClientboundStatusResponsePacketMixin.java",
-        "mixin/ClientboundStatusResponsePacketMixin.java"
-    ),
-    listOf(
-        "mixin/ConnectionMixin.java",
-        "mixin/ConnectionMixin.java"
-    ),
-    listOf(
-        "mixin/ConnectScreenMixin.java",
-        "mixin/ConnectScreenMixin.java"
-    ),
-    listOf(
-        "mixin/DebugScreenOverlayMixin.java",
-        "mixin/DebugScreenOverlayMixin.java"
-    ),
-    listOf(
-        "mixin/JoinMultiplayerScreenMixin.java",
-        "mixin/JoinMultiplayerScreenMixin.java"
-    ),
-    listOf(
-        "mixin/ServerStatusPingerResponseMixin.java",
-        "mixin/ServerStatusPingerResponseMixin.java"
-    ),
-    listOf(
-        "mixin/StatusResponseWriteMixin.java",
-        "mixin/StatusResponseWriteMixin.java"
-    )
-)
-
-val fabricBase = layout.projectDirectory.dir(
-    "fabric/src/main/java/top/tangge233/netbridge/fabric"
-)
-val neoforgeBase = layout.projectDirectory.dir(
-    "neoforge/src/main/java/top/tangge233/netbridge/neoforge"
-)
-
-tasks.register("checkSyncedCopies") {
-    group = "verification"
-    description = "Verifies fabric/neoforge source copies stay in sync."
-    doLast {
-        fun normalize(file: File): String = file.readLines()
-                .filter { line ->
-                    val t = line.trim()
-                    t.isNotEmpty() && !t.startsWith("package ") && !t.startsWith("import ")
-                }.joinToString("\n") {
-                    it.trim()
-                }
-
-        val failed = mutableListOf<String>()
-        for (pair in syncedCopies) {
-            val fabFile = fabricBase.file(pair[0]).asFile
-            val neoFile = neoforgeBase.file(pair[1]).asFile
-            if (!fabFile.exists() || !neoFile.exists()) {
-                val side = if (fabFile.exists()) "neoforge" else "fabric"
-                failed.add("${pair[0]}: missing ($side side)")
-            } else if (normalize(fabFile) != normalize(neoFile)) {
-                failed.add("${pair[0]}: content diverged between :fabric and :neoforge")
-            }
-        }
-        if (failed.isNotEmpty()) {
-            throw GradleException("Synced source copies out of sync:\n  ${failed.joinToString("\n  ")}")
-        }
-        logger.lifecycle("synced copies OK (${syncedCopies.size} pairs)")
-    }
-}
-
 val fabricJarConfig = configurations.create("fabricJarConfig") {
     isCanBeConsumed = false
     isCanBeResolved = true
@@ -134,9 +58,8 @@ dependencies {
 
 tasks.register<Copy>("assembleAll") {
     group = "build"
-    description = "Assemble both platform mod jars into root build/libs/."
+    description = "Assembles both platform mod jars into root build/libs/."
     dependsOn(tasks.named("buildCdylib"))
-    dependsOn(tasks.named("checkSyncedCopies"))
     from(fabricJarConfig) {
         rename { "net-bridge-fabric-${project.version}.jar" }
     }

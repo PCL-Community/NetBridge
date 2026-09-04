@@ -1,4 +1,4 @@
-package top.tangge233.netbridge.neoforge.mixin;
+package top.tangge233.netbridge.mixin;
 
 import io.netty.channel.ChannelFuture;
 import net.minecraft.network.Connection;
@@ -8,7 +8,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import top.tangge233.netbridge.NetBridge;
-import top.tangge233.netbridge.neoforge.mc.NativeClientTransport;
+import top.tangge233.netbridge.mc.NativeClientTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 import java.net.InetSocketAddress;

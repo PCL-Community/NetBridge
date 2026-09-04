@@ -1,4 +1,4 @@
-package top.tangge233.netbridge.neoforge.mixin;
+package top.tangge233.netbridge.mixin;
 
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.ConnectScreen;

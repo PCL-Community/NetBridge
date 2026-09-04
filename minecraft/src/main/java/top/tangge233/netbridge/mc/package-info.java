@@ -1,4 +1,4 @@
 @NullMarked
-package top.tangge233.netbridge.fabric.mixin;
+package top.tangge233.netbridge.mc;
 
 import org.jspecify.annotations.NullMarked;

@@ -1,18 +1,18 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "top.tangge233.netbridge.neoforge.mixin",
+  "package": "top.tangge233.netbridge.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "StatusResponseWriteMixin"
   ],
   "client": [
-    "ConnectionMixin",
     "ClientboundStatusResponsePacketMixin",
-    "ServerStatusPingerResponseMixin",
-    "JoinMultiplayerScreenMixin",
+    "ConnectionMixin",
     "ConnectScreenMixin",
-    "DebugScreenOverlayMixin"
+    "DebugScreenOverlayMixin",
+    "JoinMultiplayerScreenMixin",
+    "ServerStatusPingerResponseMixin"
   ],
   "injectors": {
     "defaultRequire": 1

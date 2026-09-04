@@ -7,6 +7,10 @@ java {
     withSourcesJar()
 }
 
+sourceSets.named("main") {
+    java.srcDir(rootProject.layout.projectDirectory.dir("minecraft/src/main/java"))
+}
+
 dependencies {
     minecraft(libs.minecraft)
     mappings(loom.officialMojangMappings())

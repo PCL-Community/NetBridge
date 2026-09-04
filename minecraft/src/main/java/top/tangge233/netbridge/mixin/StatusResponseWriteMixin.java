@@ -1,4 +1,4 @@
-package top.tangge233.netbridge.neoforge.mixin;
+package top.tangge233.netbridge.mixin;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.JsonOps;
@@ -6,6 +6,7 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.protocol.status.ClientboundStatusResponsePacket;
 import net.minecraft.network.protocol.status.ServerStatus;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import top.tangge233.netbridge.NetBridge;
@@ -17,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 @Mixin(ClientboundStatusResponsePacket.class)
 public abstract class StatusResponseWriteMixin {
 
+    @Unique
     private static final int MAX_STATUS_JSON = 262144;
 
     @Redirect(

@@ -12,7 +12,8 @@
     ]
   },
   "mixins": [
-    "net-bridge.mixins.json"
+    "net-bridge.mixins.json",
+    "net-bridge-fabric.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=0.15.0",

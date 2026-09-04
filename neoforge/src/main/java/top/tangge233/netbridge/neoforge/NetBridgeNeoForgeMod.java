@@ -8,7 +8,7 @@ import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.config.ConfigPaths;
-import top.tangge233.netbridge.neoforge.mc.NativeServerTransport;
+import top.tangge233.netbridge.mc.NativeServerTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 @Mod(NetBridgeNeoForgeMod.MOD_ID)
@@ -18,8 +18,7 @@ public class NetBridgeNeoForgeMod {
 
     public NetBridgeNeoForgeMod(IEventBus modBus) {
         var paths = new ConfigPaths(
-                FMLPaths.CONFIGDIR.get()
-                        .resolve("net-bridge")
+                FMLPaths.CONFIGDIR.get().resolve("net-bridge")
         );
         NetBridgeServices.bootstrap(paths);
 

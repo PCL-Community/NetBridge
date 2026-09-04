@@ -6,7 +6,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import top.tangge233.netbridge.fabric.mc.NativeServerTransport;
+import top.tangge233.netbridge.mc.NativeServerTransport;
 import top.tangge233.netbridge.runtime.NetBridgeServices;
 
 @Mixin(MinecraftServer.class)
@@ -23,8 +23,13 @@ public class MinecraftServerLifecycleMixin {
         }
 
         var serverRuntime = NetBridgeServices.serverRuntime();
-        serverRuntime.setAdopter(connection -> NativeServerTransport.adopt(self, connection));
-        serverRuntime.start(self.getPort(), self.getLocalIp());
+        serverRuntime.setAdopter(connection ->
+                NativeServerTransport.adopt(self, connection)
+        );
+        serverRuntime.start(
+                self.getPort(),
+                self.getLocalIp()
+        );
     }
 
     @Inject(
