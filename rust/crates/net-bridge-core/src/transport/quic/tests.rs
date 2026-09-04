@@ -3,13 +3,16 @@
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 
+use crate::context::NativeContext;
 use crate::transport::TransportKind;
 use crate::*;
 
-fn wait_state(conn: u64, want: u32) {
+use std::sync::Arc;
+
+fn wait_state(ctx: &NativeContext, conn: u64, want: u32) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if connection_state(conn) == Some(want) {
+        if ctx.connection_state(conn) == Some(want) {
             return;
         }
         assert!(
@@ -20,10 +23,10 @@ fn wait_state(conn: u64, want: u32) {
     }
 }
 
-fn wait_disconnected(conn: u64) {
+fn wait_disconnected(ctx: &NativeContext, conn: u64) {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
-        match connection_state(conn) {
+        match ctx.connection_state(conn) {
             Some(STATE_CONNECTED) => {}
             _ => return,
         }
@@ -32,17 +35,17 @@ fn wait_disconnected(conn: u64) {
     }
 }
 
-fn wait_terminal(conn: u64) {
-    match connection_state(conn) {
+fn wait_terminal(ctx: &NativeContext, conn: u64) {
+    match ctx.connection_state(conn) {
         Some(STATE_CLOSED) | None => {}
         other => panic!("unexpected terminal state {other:?}"),
     }
 }
 
-fn wait_read(conn: u64, want: usize) -> Vec<u8> {
+fn wait_read(ctx: &NativeContext, conn: u64, want: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(data) = read_chunk(conn, 65536)
+        if let Ok(data) = ctx.read_chunk(conn, 65536)
             && data.len() >= want
         {
             return data.to_vec();
@@ -52,18 +55,25 @@ fn wait_read(conn: u64, want: usize) -> Vec<u8> {
     }
 }
 
+fn test_ctx() -> Arc<NativeContext> {
+    NativeContext::new(2, None).expect("native context")
+}
+
 #[test]
 fn quic_loopback_roundtrip() {
-    let server =
-        start_server(TransportKind::Quic, 0, 256, None, Default::default()).expect("start server");
-    let port = server_port(server).expect("server port");
-    let client =
-        connect(TransportKind::Quic, "127.0.0.1", port, Default::default()).expect("connect");
-    wait_state(client, STATE_CONNECTED);
+    let ctx = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Quic, 0, 256, None, Default::default())
+        .expect("start server");
+    let port = ctx.server_port(server).expect("server port");
+    let client = ctx
+        .connect(TransportKind::Quic, "127.0.0.1", port, Default::default())
+        .expect("connect");
+    wait_state(&ctx, client, STATE_CONNECTED);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let accepted = loop {
-        let a = accept_connections(server);
+        let a = ctx.accept_connections(server);
         if !a.is_empty() {
             break a;
         }
@@ -75,41 +85,46 @@ fn quic_loopback_roundtrip() {
     };
     assert_eq!(accepted.len(), 1, "server should see one connection");
     let server_conn = accepted[0];
-    assert_eq!(connection_state(server_conn), Some(STATE_CONNECTED));
+    assert_eq!(ctx.connection_state(server_conn), Some(STATE_CONNECTED));
 
     // client -> server
     let payload = b"net-bridge hello over bridge";
     assert_eq!(
-        write_chunk(client, Bytes::copy_from_slice(payload)).expect("client write"),
+        ctx.write_chunk(client, Bytes::copy_from_slice(payload))
+            .expect("client write"),
         payload.len()
     );
-    assert_eq!(wait_read(server_conn, payload.len()), payload);
+    assert_eq!(wait_read(&ctx, server_conn, payload.len()), payload);
 
     // server -> client
     let reply = b"pong from server";
     assert_eq!(
-        write_chunk(server_conn, Bytes::copy_from_slice(reply)).expect("server write"),
+        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+            .expect("server write"),
         reply.len()
     );
-    assert_eq!(wait_read(client, reply.len()), reply);
+    assert_eq!(wait_read(&ctx, client, reply.len()), reply);
 
-    close_connection(client);
-    stop_server(server);
-    wait_terminal(client);
+    ctx.close_connection(client);
+    ctx.stop_server(server);
+    wait_terminal(&ctx, client);
 }
 
 #[test]
 fn quic_peer_close_propagates_to_client() {
-    let server =
-        start_server(TransportKind::Quic, 0, 256, None, Default::default()).expect("start server");
-    let port = server_port(server).expect("server port");
-    let client =
-        connect(TransportKind::Quic, "127.0.0.1", port, Default::default()).expect("connect");
-    wait_state(client, STATE_CONNECTED);
+    let ctx = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Quic, 0, 256, None, Default::default())
+        .expect("start server");
+    let port = ctx.server_port(server).expect("server port");
+    let client = ctx
+        .connect(TransportKind::Quic, "127.0.0.1", port, Default::default())
+        .expect("connect");
+    wait_state(&ctx, client, STATE_CONNECTED);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let accepted = loop {
-        let a = accept_connections(server);
+        let a = ctx.accept_connections(server);
         if !a.is_empty() {
             break a;
         }
@@ -121,11 +136,11 @@ fn quic_peer_close_propagates_to_client() {
     };
     let server_conn = accepted[0];
 
-    assert!(close_connection(server_conn));
-    wait_disconnected(client);
+    assert!(ctx.close_connection(server_conn));
+    wait_disconnected(&ctx, client);
 
-    close_connection(client);
-    stop_server(server);
+    ctx.close_connection(client);
+    ctx.stop_server(server);
 }
 
 #[tokio::test]

@@ -40,6 +40,7 @@ val cdylibDir = rootProject.layout.buildDirectory.dir("native")
 
 tasks.named<Jar>("jar") {
     dependsOn(rootProject.tasks.named("buildCdylib"))
+    dependsOn(rootProject.tasks.named("generateNativeManifest"))
     from(cdylibDir) {
         into("native/")
     }

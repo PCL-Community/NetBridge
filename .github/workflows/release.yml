@@ -13,15 +13,98 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  java-unit:
+    name: Java unit tests (no native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.7.1'
+
+      - name: Run pure Java tests
+        run: gradle test -PskipNativeBuild
+
+  rust-unit:
+    name: Rust unit tests / clippy / fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo fmt --check
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: cargo clippy -D warnings
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        working-directory: rust
+        run: cargo test --workspace
+
+  abi-check:
+    name: ABI / symbol / FFM bootstrap check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.7.1'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Build native (release)
+        working-directory: rust
+        run: cargo build -p net-bridge-native --release
+
+      - name: Verify exported symbols
+        run: |
+          symbols=$(nm -D rust/target/release/libnet_bridge_native.so | awk '$2 == "T" {print $3}' | grep -v '^_' || true)
+          unexpected=$(printf '%s\n' "$symbols" | grep -v '^netbridge_get_api$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "unexpected exported symbols: $unexpected"
+            exit 1
+          fi
+          echo "exported business symbols: $symbols"
+
+      - name: Verify native header / ABI constants
+        run: gradle verifyArchitecture -PskipNativeBuild
+
+      - name: Run FFM bootstrap + integration tests (--illegal-native-access=deny)
+        run: gradle :common:nativeIntegrationTest -PnativeProfile=release
+
   native:
     name: native (${{ matrix.dir }})
+    needs: [ java-unit, rust-unit, abi-check ]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # dir = jar 内 native/<os>-<arch>/ 子目录（与 NativeLoader.platformDir() 一致）。
-        # 不含 macos-x86_64：Intel Mac runner 排队过久；Apple Silicon 可走
-        # Rosetta 跑 x86_64 JVM，但需自行提供原生库（loadSystem 回退）。
         include:
           - os: ubuntu-latest
             dir: linux-x86_64
@@ -48,8 +131,6 @@ jobs:
         working-directory: rust
         run: cargo build -p net-bridge-native --release
 
-      # artifact 内保持 <dir>/<lib> 结构；package job merge-multiple 后
-      # 恰好还原为 build/native/<dir>/<lib>，Gradle 原样打入 jar。
       - name: Stage native library
         shell: bash
         run: mkdir -p stage/${{ matrix.dir }} && cp rust/target/release/${{ matrix.lib }} stage/${{ matrix.dir }}/
@@ -77,9 +158,6 @@ jobs:
         with:
           gradle-version: '9.7.1'
 
-      # 四个原生库（linux/macos/windows × x86_64/arm64，macOS 仅 arm）合并到
-      # build/native/<os>-<arch>/，jar 打包时原样打入，
-      # 运行时由 NativeLoader 按 OS+架构选择对应库。
       - name: Download all native libraries
         uses: actions/download-artifact@v8
         with:
@@ -87,9 +165,7 @@ jobs:
           path: build/native
           merge-multiple: true
 
-      # 版本取自 tag（vX.Y.Z → X.Y.Z），命令行 -P 覆盖 gradle.properties 的 modVersion，
-      # jar 名与 fabric.mod.json 内嵌版本随 tag 走，无需手动同步。
-      - name: Assemble mod jars
+      - name: Assemble mod jars (includes manifest + architecture guards)
         run: gradle build assembleAll -PnativeProfile=release -PskipNativeBuild "-PmodVersion=${GITHUB_REF_NAME#v}"
 
       - name: Upload mod jars
@@ -110,8 +186,6 @@ jobs:
           name: mod-jars
           path: dist
 
-      # 两步发布保证 immutable：先以 draft 状态上传全部资产（资产不可变、外部不可见），
-      # 再切 draft=false 正式发布。
       - name: Create draft release and upload assets
         uses: softprops/action-gh-release@v3
         with:

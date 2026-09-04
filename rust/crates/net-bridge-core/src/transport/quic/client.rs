@@ -7,47 +7,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use super::connection::run_connection;
 use crate::error::{BridgeError, Transport};
-use crate::registry::{allocate_id, conns, remove_conn, report_error, runtime};
+use crate::report_error;
 use crate::socket_util;
 use crate::{
     Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded,
 };
-
-/// 客户端发起 QUIC 连接（异步握手，立即返回连接 id）。
-pub fn connect(host: &str, port: u16) -> Result<u64, BridgeError> {
-    let Some(rt) = runtime() else {
-        return Err(BridgeError::RuntimeUnavailable);
-    };
-    let (conn_id, state, to_java_tx, mut to_transport_rx, to_transport_tx) = register_client();
-    let host = host.to_string();
-    rt.spawn(async move {
-        let panicked = guarded("quic connect task", async move {
-            if let Some((conn, send, recv)) =
-                establish(&host, port, conn_id, &state, &mut to_transport_rx).await
-            {
-                state.store(STATE_CONNECTED, Ordering::SeqCst);
-                run_connection(
-                    conn_id,
-                    conn,
-                    send,
-                    recv,
-                    to_transport_rx,
-                    to_java_tx,
-                    to_transport_tx,
-                    state,
-                )
-                .await;
-            }
-        })
-        .await;
-        if panicked {
-            remove_conn(conn_id);
-        }
-    });
-    Ok(conn_id)
-}
 
 /// 经 NativeContext 发起 QUIC 客户端连接。
 pub fn connect_in_context(
@@ -79,7 +44,8 @@ pub fn connect_in_context(
     ctx.handle().spawn(async move {
         let panicked = guarded("quic connect task in context", async move {
             let mut rx = to_transport_rx;
-            if let Some((conn, send, recv)) = establish(&host, port, conn_id, &state, &mut rx).await
+            if let Some((conn, send, recv)) =
+                establish(&ctx_clone, &host, port, conn_id, &state, &mut rx).await
             {
                 state.store(STATE_CONNECTED, Ordering::SeqCst);
                 ctx_clone.event_sink().on_event(
@@ -133,47 +99,21 @@ pub fn connect_in_context(
     Ok(conn_id)
 }
 
-/// 注册占位句柄（状态 CONNECTING）并返回建连任务与数据循环所需各端。
-fn register_client() -> (
-    u64,
-    Arc<AtomicU32>,
-    mpsc::Sender<Bytes>,
-    mpsc::Receiver<Command>,
-    mpsc::Sender<Command>,
-) {
-    let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
-    let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
-    let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let conn_id = allocate_id();
-    conns().insert(
-        conn_id,
-        ConnHandle::new(
-            state.clone(),
-            to_java_rx,
-            to_transport_tx.clone(),
-            None,
-            None,
-            false,
-            true,
-            None,
-        ),
-    );
-    (conn_id, state, to_java_tx, to_transport_rx, to_transport_tx)
-}
-
 /// 建立连接：解析 → 绑定 → endpoint → 取消感知握手 → 双向流。
 async fn establish(
+    ctx: &crate::context::NativeContext,
     host: &str,
     port: u16,
     conn_id: u64,
     state: &Arc<AtomicU32>,
     to_transport_rx: &mut mpsc::Receiver<Command>,
 ) -> Option<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let addr = resolve_addr(host, port, conn_id, state).await?;
+    let addr = resolve_addr(ctx, host, port, conn_id, state).await?;
     let socket = match socket_util::bind_client(addr.is_ipv6()) {
         Ok(s) => s,
         Err(e) => {
             return fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Setup {
@@ -193,6 +133,7 @@ async fn establish(
         Ok(ep) => ep,
         Err(e) => {
             return fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Setup {
@@ -207,30 +148,31 @@ async fn establish(
 
     let connecting = match endpoint.connect(addr, "plaintext.test") {
         Ok(connecting) => connecting,
-        Err(e) => return fail(conn_id, state, connect_error(addr, e)),
+        Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
     };
     let conn = tokio::select! {
         result = connecting => match result {
             Ok(conn) => conn,
-            Err(e) => return fail(conn_id, state, connect_error(addr, e)),
+            Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
         },
         _ = to_transport_rx.recv() => {
-            cancel(conn_id, state);
+            cancel(ctx, conn_id, state);
             return None;
         }
     };
     let (send, recv) = match conn.open_bi().await {
         Ok(pair) => pair,
-        Err(e) => return fail(conn_id, state, connect_error(addr, e)),
+        Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
     };
     if state.load(Ordering::SeqCst) == STATE_CLOSED {
-        cancel(conn_id, state);
+        cancel(ctx, conn_id, state);
         return None;
     }
     Some((conn, send, recv))
 }
 
 async fn resolve_addr(
+    ctx: &crate::context::NativeContext,
     host: &str,
     port: u16,
     conn_id: u64,
@@ -239,6 +181,7 @@ async fn resolve_addr(
     match tokio::net::lookup_host((host, port)).await {
         Ok(mut addrs) => addrs.next().or_else(|| {
             fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Dns {
@@ -249,6 +192,7 @@ async fn resolve_addr(
             )
         }),
         Err(source) => fail(
+            ctx,
             conn_id,
             state,
             BridgeError::Dns {
@@ -275,14 +219,19 @@ fn io_no_address() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::NotFound, "no address resolved")
 }
 
-fn fail<T>(conn_id: u64, state: &Arc<AtomicU32>, err: BridgeError) -> Option<T> {
+fn fail<T>(
+    ctx: &crate::context::NativeContext,
+    conn_id: u64,
+    state: &Arc<AtomicU32>,
+    err: BridgeError,
+) -> Option<T> {
     state.store(crate::STATE_FAILED, Ordering::SeqCst);
-    remove_conn(conn_id);
+    ctx.remove_conn(conn_id);
     report_error(err.message());
     None
 }
 
-fn cancel(conn_id: u64, state: &Arc<AtomicU32>) {
+fn cancel(ctx: &crate::context::NativeContext, conn_id: u64, state: &Arc<AtomicU32>) {
     state.store(STATE_CLOSED, Ordering::SeqCst);
-    remove_conn(conn_id);
+    ctx.remove_conn(conn_id);
 }

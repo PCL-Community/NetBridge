@@ -6,37 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
-use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE, get_event_sink};
-use crate::registry::remove_conn;
+use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE};
 use crate::{Command, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded};
-
-#[allow(clippy::too_many_arguments)]
-pub async fn run_connection(
-    conn_id: u64,
-    conn: quinn::Connection,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
-    to_transport_rx: mpsc::Receiver<Command>,
-    to_java_tx: mpsc::Sender<Bytes>,
-    to_transport_tx: mpsc::Sender<Command>,
-    state: Arc<AtomicU32>,
-) {
-    run_connection_with_sink(
-        conn_id,
-        conn,
-        send,
-        recv,
-        to_transport_rx,
-        to_java_tx,
-        to_transport_tx,
-        state,
-        get_event_sink().clone(),
-        Box::new(|id| {
-            remove_conn(id);
-        }),
-    )
-    .await;
-}
 
 /// 单连接读写循环：读侧推入 Java 队列，写侧消费 Java 命令。
 #[allow(clippy::too_many_arguments)]

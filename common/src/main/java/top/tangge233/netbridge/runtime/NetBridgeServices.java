@@ -17,8 +17,6 @@ import org.jspecify.annotations.Nullable;
 
 public final class NetBridgeServices {
 
-    private static final String NATIVE_PATH_PROPERTY = "netbridge.native.path";
-
     private static volatile @Nullable NetBridgeRuntime runtime;
 
     private NetBridgeServices() {
@@ -55,7 +53,7 @@ public final class NetBridgeServices {
     }
 
     private static Path resolveLibraryPath() {
-        var prop = System.getProperty(NATIVE_PATH_PROPERTY);
+        var prop = NativeLibraryResolver.overrideProperty();
         if (prop != null && !prop.isBlank()) {
             var p = Path.of(prop);
             if (!Files.exists(p)) {

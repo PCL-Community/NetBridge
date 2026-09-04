@@ -28,6 +28,245 @@ tasks.register<BuildNativeLibrary>("buildCdylib") {
     outputDir.set(layout.buildDirectory.dir("native"))
 }
 
+val generateNativeManifest = tasks.register("generateNativeManifest") {
+    group = "build"
+    description = "Writes a per-platform native manifest (sha256/ABI/version) next to each staged cdylib."
+    dependsOn(tasks.named("buildCdylib"))
+    val nativeDir = layout.buildDirectory.dir("native")
+    inputs.dir(nativeDir).optional(true)
+    outputs.files(nativeDir.map { it.dir("*manifest.json") })
+    doLast {
+        val dir = nativeDir.get().asFile
+        val header = rootDir.resolve("rust/crates/net-bridge-native/include/netbridge.h").readText()
+        val abiMajor = Regex("#define\\s+NB_ABI_MAJOR\\s+(\\d+)").find(header)?.groupValues?.get(1)
+            ?: throw GradleException("NB_ABI_MAJOR not found in netbridge.h")
+        val abiMinor = Regex("#define\\s+NB_ABI_MINOR\\s+(\\d+)").find(header)?.groupValues?.get(1)
+            ?: throw GradleException("NB_ABI_MINOR not found in netbridge.h")
+        val cargoToml = rootDir.resolve("rust/crates/net-bridge-native/Cargo.toml").readText()
+        val rustVersion = Regex("(?m)^version\\s*=\\s*\"([^\"]+)\"").find(cargoToml)
+                ?.groupValues?.get(1)
+            ?: throw GradleException("package version not found in net-bridge-native Cargo.toml")
+
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var written = 0
+        dir.listFiles { f: File -> f.isDirectory }
+                ?.sortedBy { it.name }
+                ?.forEach { platform ->
+                    val lib = platform.listFiles { f: File ->
+                        f.isFile && (f.name.startsWith("libnet_bridge_native") || f.name == "net_bridge_native.dll")
+                    }?.firstOrNull() ?: return@forEach
+
+                    digest.reset()
+                    lib.inputStream().use { input ->
+                        val buffer = ByteArray(8192)
+                        var read: Int
+                        while (input.read(buffer).also { read = it } > 0) {
+                            digest.update(buffer, 0, read)
+                        }
+                    }
+                    val sha = digest.digest().joinToString("") { "%02x".format(it) }
+
+                    platform.resolve("manifest.json").writeText(
+                        """
+                {
+                  "artifact": "${lib.name}",
+                  "sha256": "$sha",
+                  "abiMajor": $abiMajor,
+                  "abiMinor": $abiMinor,
+                  "rustPackageVersion": "$rustVersion"
+                }
+                """.trimIndent() + "\n"
+                    )
+                    written++
+                }
+        if (written == 0) {
+            logger.warn("generateNativeManifest: no staged native libraries found in $dir")
+        } else {
+            logger.lifecycle("native manifests written for $written platform(s) (ABI $abiMajor.$abiMinor, rust $rustVersion)")
+        }
+    }
+}
+
+val verifyNativeSymbols = tasks.register("verifyNativeSymbols") {
+    group = "verification"
+    description = "Verifies the staged cdylib exports only netbridge_get_api (Linux/macOS)."
+    dependsOn(tasks.named("buildCdylib"))
+    onlyIf { org.gradle.internal.os.OperatingSystem.current().isLinux || org.gradle.internal.os.OperatingSystem.current().isMacOsX }
+    doLast {
+        val lib = layout.buildDirectory.dir("native")
+                .get().asFile
+                .resolve(top.tangge233.netbridge.build.NativePlatform.subdir)
+                .resolve(top.tangge233.netbridge.build.NativePlatform.cdylibName)
+        if (!lib.exists()) {
+            throw GradleException("staged cdylib not found: $lib")
+        }
+        val exported = providers.exec {
+            commandLine("nm", "-D", lib.absolutePath)
+        }.standardOutput.asText.get().lineSequence()
+                .filter { it.contains(" T ") }
+                .map { it.substringAfterLast(' ').trim() }
+                .filter { it.isNotEmpty() }
+                .filter { !it.startsWith("_") }
+                .filter { !it.startsWith("__") }
+                .toList()
+        val expected = setOf("netbridge_get_api")
+        val unexpected = exported - expected
+        if (unexpected.isNotEmpty()) {
+            throw GradleException(
+                "unexpected exported symbols in native library: $unexpected (allowed: $expected)"
+            )
+        }
+        logger.lifecycle("native symbol check OK (exported business symbols: $exported)")
+    }
+}
+
+val verifyArchitecture = tasks.register("verifyArchitecture") {
+    group = "verification"
+    description = "Architecture guards: FFM import allowlist, JNI zero, layer purity, nullness, no duplicated loader copies."
+    doLast {
+        val failures = mutableListOf<String>()
+
+        fun javaMainSources(vararg roots: String): List<File> =
+            roots.flatMap { root ->
+                val dir = rootDir.resolve(root)
+                if (dir.isDirectory) {
+                    dir.walkTopDown().filter { it.isFile && it.name.endsWith(".java") }.toList()
+                } else {
+                    emptyList()
+                }
+            }
+
+        val production = javaMainSources(
+            "common/src/main/java",
+            "minecraft/src/main/java",
+            "fabric/src/main/java",
+            "neoforge/src/main/java"
+        )
+
+        val ffmAllowlistPrefix = "common/src/main/java/top/tangge233/netbridge/nativebridge/internal/ffm/"
+        val runtimeAllowlist = setOf(
+            "common/src/main/java/top/tangge233/netbridge/runtime/NetBridgeServices.java"
+        )
+        val mixinGuardAllowlist = setOf(
+            "minecraft/src/main/java/top/tangge233/netbridge/mixin/ConnectionMixin.java",
+            "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
+        )
+
+        for (file in production) {
+            val rel = file.relativeTo(rootDir).path.replace('\\', '/')
+            val text = file.readText()
+
+            if (text.contains("import java.lang.foreign") && !rel.startsWith(ffmAllowlistPrefix)) {
+                failures.add("$rel: java.lang.foreign import outside nativebridge.internal.ffm")
+            }
+            if (Regex("\\bSystem\\.loadLibrary\\b|\\bSystem\\.load\\b").containsMatchIn(text)) {
+                failures.add("$rel: System.load/loadLibrary is forbidden (FFM libraryLookup only)")
+            }
+            if (Regex("public\\s+static\\s+native\\s").containsMatchIn(text)) {
+                failures.add("$rel: Java native method declarations are forbidden")
+            }
+            if (Regex("static\\s+volatile").containsMatchIn(text) && rel !in runtimeAllowlist) {
+                failures.add("$rel: static volatile business state outside the composition root")
+            }
+            if (Regex("static\\s+(final\\s+)?(ExecutorService|ScheduledExecutorService|ThreadLocal)").containsMatchIn(
+                    text
+                )
+                && rel !in mixinGuardAllowlist && rel !in runtimeAllowlist
+            ) {
+                failures.add("$rel: static executor/thread-local outside the allowlist")
+            }
+        }
+
+        val common = javaMainSources("common/src/main/java")
+        for (file in common) {
+            val rel = file.relativeTo(rootDir).path.replace('\\', '/')
+            if (Regex("import\\s+net\\.(minecraft|fabricmc|neoforged)").containsMatchIn(file.readText())) {
+                failures.add("$rel: common must not import Minecraft or loader APIs")
+            }
+        }
+        for (file in javaMainSources("minecraft/src/main/java")) {
+            val rel = file.relativeTo(rootDir).path.replace('\\', '/')
+            if (Regex("import\\s+net\\.(fabricmc|neoforged)").containsMatchIn(file.readText())) {
+                failures.add("$rel: shared minecraft layer must not import loader APIs")
+            }
+        }
+
+        val loaderDupDirs = listOf(
+            "fabric/src/main/java/top/tangge233/netbridge/fabric/mc",
+            "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mc",
+            "neoforge/src/main/java/top/tangge233/netbridge/neoforge/mixin"
+        )
+        for (d in loaderDupDirs) {
+            if (rootDir.resolve(d).isDirectory) {
+                failures.add("$d: duplicated loader copy directory must not exist (shared source set only)")
+            }
+        }
+
+        val pkgRoots = listOf(
+            "common/src/main/java/top/tangge233/netbridge",
+            "minecraft/src/main/java/top/tangge233/netbridge"
+        )
+        for (rootPath in pkgRoots) {
+            val root = rootDir.resolve(rootPath)
+            if (!root.isDirectory) {
+                continue
+            }
+            val packages = root.walkTopDown()
+                    .filter {
+                        it.isDirectory && it.listFiles { f: File -> f.name.endsWith(".java") }
+                                ?.isNotEmpty() == true
+                    }
+                    .toList()
+            for (pkg in packages) {
+                val hasInfo = pkg.resolve("package-info.java").isFile
+                if (!hasInfo) {
+                    failures.add(
+                        "${
+                            pkg.relativeTo(rootDir).path.replace(
+                                '\\',
+                                '/'
+                            )
+                        }: missing package-info.java (@NullMarked required)"
+                    )
+                }
+            }
+        }
+        for (file in production) {
+            if (file.readText().contains("@NullUnmarked")) {
+                failures.add("${file.relativeTo(rootDir).path}: @NullUnmarked is forbidden")
+            }
+        }
+
+        val coreSrc = rootDir.resolve("rust/crates/net-bridge-core/src")
+        if (coreSrc.isDirectory) {
+            coreSrc.walkTopDown().filter { it.isFile && it.name.endsWith(".rs") }.forEach { file ->
+                val rel = file.relativeTo(rootDir).path.replace('\\', '/')
+                val text = file.readText()
+                if (text.contains("extern \"C\"") || text.contains("use jni") || text.contains("JavaVM")) {
+                    failures.add("$rel: FFI/JNI constructs are forbidden in net-bridge-core")
+                }
+                if (Regex("(?m)^static\\s+(mut\\s+)?(RUNTIME|CONNS|SERVERS|NEXT_ID|EVENT_SINK)\\b").containsMatchIn(
+                        text
+                    )
+                ) {
+                    failures.add("$rel: process-global native registries are forbidden in net-bridge-core")
+                }
+            }
+        }
+        val coreCargo = rootDir.resolve("rust/crates/net-bridge-core/Cargo.toml")
+        if (coreCargo.readText().contains("jni")) {
+            failures.add("rust/crates/net-bridge-core/Cargo.toml: jni dependency is forbidden in core")
+        }
+
+        if (failures.isNotEmpty()) {
+            throw GradleException(
+                "Architecture verification failed:\n  ${failures.joinToString("\n  ")}"
+            )
+        }
+        logger.lifecycle("architecture verification OK (${production.size} java files scanned)")
+    }
+}
+
 val fabricJarConfig = configurations.create("fabricJarConfig") {
     isCanBeConsumed = false
     isCanBeResolved = true
@@ -60,6 +299,9 @@ tasks.register<Copy>("assembleAll") {
     group = "build"
     description = "Assembles both platform mod jars into root build/libs/."
     dependsOn(tasks.named("buildCdylib"))
+    dependsOn(generateNativeManifest)
+    dependsOn(verifyNativeSymbols)
+    dependsOn(verifyArchitecture)
     from(fabricJarConfig) {
         rename { "net-bridge-fabric-${project.version}.jar" }
     }

@@ -17,18 +17,28 @@
 
 ## 工作原理
 
-模组接管了 Minecraft 的服务端连接流，使用 QUIC-Plaintext（或带 FEC 的 KCP）承载数据流。模组通过 JNI 调用由 Rust🦀 编写的连接管理组件。
+模组接管了 Minecraft 的服务端连接流，使用 QUIC-Plaintext（或带 FEC 的 KCP）承载数据流。传输核心由 Rust🦀
+编写，通过 C ABI（`netbridge_get_api`）经 Java 25 的 FFM API 调用。
 
 服务端在 ping 响应的顶层 `networks` 对象中宣告其加速传输能力，每个传输一个条目：
 
 ```json
 "networks": {
-  "quic": {"enable": true, "port": 25565, "protocol": "net-bri-quic/1"},
-  "kcp":  {"enable": true, "port": 25566, "protocol": "net-bri-kcp/1"}
+  "quic": {
+    "enable": true,
+    "port": 25565,
+    "protocol": "net-bri-quic/1"
+  },
+  "kcp": {
+    "enable": true,
+    "port": 25566,
+    "protocol": "net-bri-kcp/1"
+  }
 }
 ```
 
-如果服务器也安装了本模组，你会在其描述末尾看到 `[QUIC/KCP]` 标记。客户端在多人游戏界面通过传输按钮选择 QUIC 或 KCP。
+如果服务器也安装了本模组，你会在其描述末尾看到 `[QUIC/KCP]` 标记。客户端在多人游戏界面通过传输按钮选择
+QUIC 或 KCP。
 
 > 若两次握手尝试均失败，将自动为该连接回退到 TCP，并记忆 5 分钟。
 
@@ -73,10 +83,10 @@ profile = "balance" # balance / aggressive
 
 依赖：
 
-| 依赖 | 说明 |
-| ---------- | ----- |
-| Rust | 经 [rustup](https://rustup.rs/) 安装 |
-| JDK 21+ | Gradle 经 `./gradlew` wrapper 运行（JDK 取自 PATH） |
+| 依赖   | 说明                                                                                        |
+|--------|---------------------------------------------------------------------------------------------|
+| Rust   | 经 [rustup](https://rustup.rs/) 安装                                                        |
+| JDK 25 | 硬性要求：native 传输使用 Java FFM API。Gradle 经 `./gradlew` wrapper 运行（JDK 取自 PATH） |
 
 发布模式构建：
 
@@ -95,6 +105,32 @@ make debug
 ```bash
 make clean
 ```
+
+### 运行时要求
+
+游戏与专用服务端必须运行在 Java 25 并启用 FFM：
+
+```text
+--enable-native-access=ALL-UNNAMED
+```
+
+### 验证与开发
+
+```bash
+./gradlew test                                  # 纯 Java 测试（无需 native）
+cargo test --workspace                          # Rust core/native 测试
+./gradlew :common:nativeIntegrationTest         # FFM 集成测试（QUIC/KCP 回环）
+./gradlew :common:ffmBenchmark                  # FFM 数据面基准
+./gradlew verifyArchitecture verifyNativeSymbols generateNativeManifest
+```
+
+本地调试自建 cdylib 时可显式指定路径（生产不回退 `java.library.path` / `System.load`）：
+
+```text
+-Dnetbridge.native.path=/绝对路径/libnet_bridge_native.so
+```
+
+诊断手册见 `docs/troubleshooting.md`，Java 25 / FFM / C ABI 架构见 `docs/adr/0009`。
 
 ## 许可证
 

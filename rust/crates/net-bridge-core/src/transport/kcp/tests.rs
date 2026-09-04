@@ -3,14 +3,17 @@
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 
+use crate::context::NativeContext;
 use crate::transport::TransportKind;
 use crate::transport::kcp::config::KcpProfile;
 use crate::*;
 
-fn wait_state(conn: u64, want: u32) {
+use std::sync::Arc;
+
+fn wait_state(ctx: &NativeContext, conn: u64, want: u32) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if connection_state(conn) == Some(want) {
+        if ctx.connection_state(conn) == Some(want) {
             return;
         }
         assert!(
@@ -21,10 +24,10 @@ fn wait_state(conn: u64, want: u32) {
     }
 }
 
-fn wait_disconnected(conn: u64) {
+fn wait_disconnected(ctx: &NativeContext, conn: u64) {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
-        match connection_state(conn) {
+        match ctx.connection_state(conn) {
             Some(STATE_CONNECTED) => {}
             _ => return,
         }
@@ -33,10 +36,10 @@ fn wait_disconnected(conn: u64) {
     }
 }
 
-fn wait_read(conn: u64, want: usize) -> Vec<u8> {
+fn wait_read(ctx: &NativeContext, conn: u64, want: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(data) = read_chunk(conn, 65536)
+        if let Ok(data) = ctx.read_chunk(conn, 65536)
             && data.len() >= want
         {
             return data.to_vec();
@@ -46,24 +49,32 @@ fn wait_read(conn: u64, want: usize) -> Vec<u8> {
     }
 }
 
+fn test_ctx() -> Arc<NativeContext> {
+    NativeContext::new(2, None).expect("native context")
+}
+
 #[test]
 fn kcp_loopback_roundtrip() {
-    let server = start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
+    let ctx = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
         .expect("start kcp server");
-    let port = server_port(server).expect("kcp server port");
-    let client =
-        connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced).expect("kcp connect");
+    let port = ctx.server_port(server).expect("kcp server port");
+    let client = ctx
+        .connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced)
+        .expect("kcp connect");
 
     let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
     assert_eq!(
-        write_chunk(client, Bytes::from(payload.clone())).expect("client write"),
+        ctx.write_chunk(client, Bytes::from(payload.clone()))
+            .expect("client write"),
         payload.len(),
         "kcp client must accept writes while connecting"
     );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let accepted = loop {
-        let a = accept_connections(server);
+        let a = ctx.accept_connections(server);
         if !a.is_empty() {
             break a;
         }
@@ -76,39 +87,44 @@ fn kcp_loopback_roundtrip() {
     // client -> server
     let mut got = Vec::with_capacity(payload.len());
     while got.len() < payload.len() {
-        got.extend_from_slice(&wait_read(server_conn, 1));
+        got.extend_from_slice(&wait_read(&ctx, server_conn, 1));
     }
     assert_eq!(got, payload);
 
     // server -> client
     let reply = b"pong over kcp";
     assert_eq!(
-        write_chunk(server_conn, Bytes::copy_from_slice(reply)).expect("server write"),
+        ctx.write_chunk(server_conn, Bytes::copy_from_slice(reply))
+            .expect("server write"),
         reply.len()
     );
-    assert_eq!(wait_read(client, reply.len()), reply);
-    wait_state(client, STATE_CONNECTED);
+    assert_eq!(wait_read(&ctx, client, reply.len()), reply);
+    wait_state(&ctx, client, STATE_CONNECTED);
 
-    close_connection(client);
-    stop_server(server);
+    ctx.close_connection(client);
+    ctx.stop_server(server);
 }
 
 #[test]
 fn kcp_sustained_and_idle_phase() {
-    let server = start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
+    let ctx = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
         .expect("start kcp server");
-    let port = server_port(server).expect("kcp server port");
-    let client =
-        connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced).expect("kcp connect");
+    let port = ctx.server_port(server).expect("kcp server port");
+    let client = ctx
+        .connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced)
+        .expect("kcp connect");
 
     let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
     assert_eq!(
-        write_chunk(client, Bytes::from(payload.clone())).expect("client write"),
+        ctx.write_chunk(client, Bytes::from(payload.clone()))
+            .expect("client write"),
         payload.len()
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     let accepted = loop {
-        let a = accept_connections(server);
+        let a = ctx.accept_connections(server);
         if !a.is_empty() {
             break a;
         }
@@ -124,22 +140,24 @@ fn kcp_sustained_and_idle_phase() {
         round += 1;
         let msg = format!("active-{round}").into_bytes();
         assert_eq!(
-            write_chunk(client, Bytes::copy_from_slice(&msg)).expect("cli write"),
+            ctx.write_chunk(client, Bytes::copy_from_slice(&msg))
+                .expect("cli write"),
             msg.len()
         );
-        wait_read(server_conn, msg.len());
+        wait_read(&ctx, server_conn, msg.len());
         assert_eq!(
-            write_chunk(server_conn, Bytes::copy_from_slice(&msg)).expect("srv write"),
+            ctx.write_chunk(server_conn, Bytes::copy_from_slice(&msg))
+                .expect("srv write"),
             msg.len()
         );
-        wait_read(client, msg.len());
+        wait_read(&ctx, client, msg.len());
         assert_eq!(
-            connection_state(client),
+            ctx.connection_state(client),
             Some(STATE_CONNECTED),
             "client died at round {round}"
         );
         assert_eq!(
-            connection_state(server_conn),
+            ctx.connection_state(server_conn),
             Some(STATE_CONNECTED),
             "server died at round {round}"
         );
@@ -147,48 +165,54 @@ fn kcp_sustained_and_idle_phase() {
 
     std::thread::sleep(Duration::from_secs(45));
     assert_eq!(
-        connection_state(client),
+        ctx.connection_state(client),
         Some(STATE_CONNECTED),
         "client died during idle phase"
     );
     assert_eq!(
-        connection_state(server_conn),
+        ctx.connection_state(server_conn),
         Some(STATE_CONNECTED),
         "server died during idle phase"
     );
 
     let msg = b"resume-after-idle";
     assert_eq!(
-        write_chunk(client, Bytes::copy_from_slice(msg)).expect("cli resume"),
+        ctx.write_chunk(client, Bytes::copy_from_slice(msg))
+            .expect("cli resume"),
         msg.len()
     );
-    wait_read(server_conn, msg.len());
+    wait_read(&ctx, server_conn, msg.len());
     assert_eq!(
-        write_chunk(server_conn, Bytes::copy_from_slice(msg)).expect("srv resume"),
+        ctx.write_chunk(server_conn, Bytes::copy_from_slice(msg))
+            .expect("srv resume"),
         msg.len()
     );
-    wait_read(client, msg.len());
+    wait_read(&ctx, client, msg.len());
 
-    close_connection(client);
-    stop_server(server);
+    ctx.close_connection(client);
+    ctx.stop_server(server);
 }
 
 #[test]
 fn kcp_peer_close_propagates_to_client() {
-    let server = start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
+    let ctx = test_ctx();
+    let server = ctx
+        .start_server(TransportKind::Kcp, 0, 256, None, KcpProfile::Balanced)
         .expect("start kcp server");
-    let port = server_port(server).expect("kcp server port");
-    let client =
-        connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced).expect("kcp connect");
+    let port = ctx.server_port(server).expect("kcp server port");
+    let client = ctx
+        .connect(TransportKind::Kcp, "127.0.0.1", port, KcpProfile::Balanced)
+        .expect("kcp connect");
 
     assert_eq!(
-        write_chunk(client, Bytes::copy_from_slice(b"warm-up")).expect("warm-up write"),
+        ctx.write_chunk(client, Bytes::copy_from_slice(b"warm-up"))
+            .expect("warm-up write"),
         7
     );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let accepted = loop {
-        let a = accept_connections(server);
+        let a = ctx.accept_connections(server);
         if !a.is_empty() {
             break a;
         }
@@ -198,9 +222,9 @@ fn kcp_peer_close_propagates_to_client() {
     let server_conn = accepted[0];
 
     std::thread::sleep(Duration::from_millis(1));
-    assert!(close_connection(server_conn));
-    wait_disconnected(client);
+    assert!(ctx.close_connection(server_conn));
+    wait_disconnected(&ctx, client);
 
-    close_connection(client);
-    stop_server(server);
+    ctx.close_connection(client);
+    ctx.stop_server(server);
 }

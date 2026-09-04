@@ -10,55 +10,10 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use super::config::{KcpProfile, build_config};
-use super::connection::run_kcp_connection;
 use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
-use crate::registry::{allocate_id, remove_conn, runtime, servers};
-use crate::server_ops::{register_connection, stop_server};
 use crate::socket_util;
 use crate::{ServerHandle, TransportEndpoint, guarded, try_admit};
-
-/// 启动 KCP 服务端（端口 0 系统分配）。
-pub fn start_server(
-    port: u16,
-    max_connections: usize,
-    bind: Option<IpAddr>,
-    profile: KcpProfile,
-) -> Result<u64, BridgeError> {
-    let Some(rt) = runtime() else {
-        return Err(BridgeError::RuntimeUnavailable);
-    };
-    let config = build_config(profile);
-    let server_id = allocate_id();
-
-    let (tx, rx) = std::sync::mpsc::channel::<Result<u16, BridgeError>>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
-    rt.spawn(async move {
-        let panicked = guarded("kcp accept task", async move {
-            server_task(
-                server_id,
-                port,
-                bind,
-                max_connections,
-                config,
-                tx,
-                stop_tx,
-                stop_rx,
-            )
-            .await;
-        })
-        .await;
-        if panicked {
-            servers().remove(&server_id);
-        }
-    });
-
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(_port)) => Ok(server_id),
-        Ok(Err(msg)) => Err(msg),
-        Err(_) => Err(BridgeError::Other("kcp listener setup timeout".into())),
-    }
-}
 
 /// 经 NativeContext 启动 KCP 服务端。
 pub fn start_server_in_context(
@@ -220,48 +175,6 @@ async fn accept_loop_in_context(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn server_task(
-    server_id: u64,
-    port: u16,
-    bind: Option<IpAddr>,
-    max_connections: usize,
-    config: KcpConfig,
-    tx: std::sync::mpsc::Sender<Result<u16, BridgeError>>,
-    stop_tx: mpsc::Sender<()>,
-    mut stop_rx: mpsc::Receiver<()>,
-) {
-    let (mut listener, local) = match bind_listener(port, bind, max_connections, &config).await {
-        Ok(pair) => pair,
-        Err(msg) => {
-            let _ = tx.send(Err(msg));
-            return;
-        }
-    };
-    let conn_count = Arc::new(AtomicUsize::new(0));
-    servers().insert(
-        server_id,
-        ServerHandle {
-            endpoint: TransportEndpoint::Kcp(stop_tx),
-            port: local.port(),
-            max_connections,
-            conn_count: Arc::clone(&conn_count),
-        },
-    );
-    let _ = tx.send(Ok(local.port()));
-
-    accept_loop(
-        &mut listener,
-        &mut stop_rx,
-        server_id,
-        max_connections,
-        conn_count,
-    )
-    .await;
-    drop(listener);
-    let _ = stop_server(server_id);
-}
-
 async fn bind_listener(
     port: u16,
     bind: Option<IpAddr>,
@@ -292,46 +205,6 @@ async fn bind_listener(
         KcpUdpStream::socket_listen(Arc::new(config.clone()), udp, max_connections.max(8), None)
             .map_err(|e| BridgeError::Other(format!("kcp listener: {e}")))?;
     Ok((listener, local))
-}
-
-async fn accept_loop(
-    listener: &mut KcpUdpStream,
-    stop_rx: &mut mpsc::Receiver<()>,
-    server_id: u64,
-    max_connections: usize,
-    conn_count: Arc<AtomicUsize>,
-) {
-    loop {
-        let accepted = tokio::select! {
-            _ = stop_rx.recv() => None,
-            acc = listener.accept() => acc.ok(),
-        };
-        let Some((stream, peer)) = accepted else {
-            break;
-        };
-        if !admit(&conn_count, max_connections) {
-            continue;
-        }
-        let reg = register_connection(server_id, peer, Arc::clone(&conn_count));
-        let conn_id = reg.conn_id;
-        tokio::spawn(async move {
-            let panicked = guarded("kcp connection task", async move {
-                run_kcp_connection(
-                    conn_id,
-                    FecStream::new(stream),
-                    reg.to_transport_rx,
-                    reg.to_java_tx,
-                    reg.state,
-                    false,
-                )
-                .await;
-            })
-            .await;
-            if panicked {
-                remove_conn(conn_id);
-            }
-        });
-    }
 }
 
 fn admit(conn_count: &AtomicUsize, max: usize) -> bool {

@@ -2,11 +2,8 @@
 #![forbid(unsafe_code)]
 
 pub mod context;
-pub mod dataplane;
 pub mod error;
 pub mod event;
-pub mod registry;
-pub mod server_ops;
 pub mod socket_util;
 pub mod transport;
 
@@ -14,11 +11,8 @@ pub mod transport;
 mod tests;
 
 pub use context::NativeContext;
-pub use dataplane::{close_connection, connection_state, read_chunk, write_chunk};
 pub use error::BridgeError;
-pub use event::{EventSink, NoopEventSink, get_event_sink, set_event_sink};
-pub use registry::{conn_remote_addr, report_error};
-pub use server_ops::{accept_connections, server_port, stop_server};
+pub use event::{EventSink, NoopEventSink};
 pub use transport::TransportKind;
 
 use std::any::Any;
@@ -111,32 +105,9 @@ pub enum TransportEndpoint {
     Kcp(tokio::sync::mpsc::Sender<()>),
 }
 
-/// 启动指定传输的服务端 acceptor。`port` 0 表示系统分配；
-/// `profile` 仅对 KCP 有意义（QUIC 忽略）。
-pub fn start_server(
-    kind: TransportKind,
-    port: u16,
-    max_connections: usize,
-    bind: Option<std::net::IpAddr>,
-    profile: transport::kcp::config::KcpProfile,
-) -> Result<u64, BridgeError> {
-    match kind {
-        TransportKind::Quic => transport::quic::start_server(port, max_connections, bind),
-        TransportKind::Kcp => transport::kcp::start_server(port, max_connections, bind, profile),
-    }
-}
-
-/// 经指定传输发起客户端连接（异步建立，立即返回连接 id）。
-pub fn connect(
-    kind: TransportKind,
-    host: &str,
-    port: u16,
-    profile: transport::kcp::config::KcpProfile,
-) -> Result<u64, BridgeError> {
-    match kind {
-        TransportKind::Quic => transport::quic::connect(host, port),
-        TransportKind::Kcp => transport::kcp::connect(host, port, profile),
-    }
+/// 错误即时上报：stderr 由 Minecraft 启动器重定向进 logs/latest.log。
+pub fn report_error(msg: String) {
+    eprintln!("[net-bridge-native] error: {msg}");
 }
 
 /// 尝试把一条新连接计入服务端实例活跃数；超限回滚并拒绝。

@@ -298,6 +298,13 @@ impl NativeContext {
             self.close_connection(c_id);
         }
 
+        // runtime 即将销毁：任务清理回调不会再运行，此处强制回收注册表，
+        // 保证 shutdown 后 registry 归零（无泄漏）。
+        let remaining: Vec<u64> = self.connections.iter().map(|e| *e.key()).collect();
+        for c_id in remaining {
+            self.remove_conn(c_id);
+        }
+
         // 关闭 Tokio runtime
         let mut guard = self.runtime.lock().unwrap();
         if let Some(rt) = guard.take() {
@@ -356,5 +363,77 @@ mod tests {
             .expect("shutdown context");
         assert_eq!(ctx.state(), CONTEXT_STATE_CLOSED);
         assert!(!ctx.is_running());
+    }
+
+    #[test]
+    fn context_repeated_lifecycle_cycles_no_leak() {
+        for cycle in 0..8u32 {
+            let ctx = NativeContext::new(2, None).expect("create context");
+            let server = ctx
+                .start_server(TransportKind::Quic, 0, 16, None, KcpProfile::Balanced)
+                .expect("start server");
+            let port = ctx.server_port(server).expect("server port");
+
+            let client = ctx
+                .connect(TransportKind::Quic, "127.0.0.1", port, KcpProfile::Balanced)
+                .expect("connect");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if ctx.connection_state(client) == Some(STATE_CONNECTED) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                ctx.connection_state(client),
+                Some(STATE_CONNECTED),
+                "cycle {cycle}: client not connected"
+            );
+
+            let accept_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let accepted = loop {
+                let a = ctx.accept_connections(server);
+                if !a.is_empty() {
+                    break a;
+                }
+                assert!(
+                    std::time::Instant::now() < accept_deadline,
+                    "cycle {cycle}: accept timeout"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(accepted.len(), 1);
+            let server_conn = accepted[0];
+
+            let payload = format!("cycle-{cycle}-payload").into_bytes();
+            assert_eq!(
+                ctx.write_chunk(client, Bytes::copy_from_slice(&payload))
+                    .expect("write"),
+                payload.len()
+            );
+            let read_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut got = 0usize;
+            while got < payload.len() && std::time::Instant::now() < read_deadline {
+                match ctx.read_chunk(server_conn, 65536) {
+                    Ok(data) if !data.is_empty() => got += data.len(),
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            assert_eq!(got, payload.len(), "cycle {cycle}: roundtrip incomplete");
+
+            ctx.close_connection(client);
+            ctx.close_connection(server_conn);
+            ctx.shutdown(Duration::from_secs(3)).expect("shutdown");
+            assert_eq!(ctx.state(), CONTEXT_STATE_CLOSED);
+            assert!(
+                ctx.conns().is_empty(),
+                "cycle {cycle}: leaked connections: {:?}",
+                ctx.conns().iter().map(|e| *e.key()).collect::<Vec<_>>()
+            );
+            assert!(
+                ctx.servers_map().is_empty(),
+                "cycle {cycle}: leaked servers"
+            );
+        }
     }
 }

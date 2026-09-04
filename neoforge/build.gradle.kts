@@ -33,6 +33,7 @@ val cdylibDir = rootProject.layout.buildDirectory.dir("native")
 
 val jarNeoForge = tasks.register<Jar>("jarNeoForge") {
     dependsOn(rootProject.tasks.named("buildCdylib"))
+    dependsOn(rootProject.tasks.named("generateNativeManifest"))
     archiveFileName.set("net-bridge-neoforge-${project.version}.jar")
     from(sourceSets.named("main").map { it.output })
     from(project(":common").the<SourceSetContainer>()["main"].output)

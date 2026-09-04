@@ -1,66 +1,111 @@
 # net-bridge 术语表
 
-随 grilling 进展更新。标 ⏳ 的条目仍在拷问中，定稿后移除标记。
-ADR 序列自重构起重新编号（docs/adr/0001 起）；旧代码注释中 ADR-0001~0007 引用已弃用，重构时随手清理。
+描述 Java 25 + FFM 重构完成后的现行架构。历史决议见 `docs/adr/`（0004/0006/0007 已被 0009/0010/0011
+取代）；里程碑历史见旧 refactor-plan 记录。
 
 ## 架构总览
 
-- **net-bridge**：Minecraft mod 总体。`common`（平台无关逻辑）+ `fabric` / `neoforge`（loader 适配层）。
-- **net-bridge-native**：Rust crate，经 JNI 向 Java 暴露传输原语。持有 tokio runtime 与 endpoint。
-- **JNI 桥**：Java `top.tangge233.netbridge.jni.NativeBridge`（原 `QuicNative`，ADR-0007 去协议化改名）
-  ↔ Rust 导出函数。句柄式注册表（传输无关 `long` id）。ABI `0.2.0`，不匹配即拒绝加载。
-- **Transport trait**（Rust，ADR-0007）：connect/accept/state/read/write/close 统一抽象；
-  quic 与 kcp 各自实现，JNI 层经 `dyn Transport` 分派。
-- **双 loader 源码副本**：mixin 与 transport 类在 fabric/neoforge 各一份源码副本；mixin 仅挂载点，
-  逻辑下沉 common。
+- **net-bridge**：Minecraft mod 总体。模块分层：`common`（纯 Java domain/runtime/native 抽象/config，无
+  Minecraft import）→ `minecraft`（共享 Minecraft-aware 层，一份源码编译进 两个 loader）→ `fabric` /
+  `neoforge`（仅 bootstrap 与生命周期 glue）。
+- **Rust workspace**：`net-bridge-core`（纯传输核心：tokio runtime、QUIC/KCP、连接注册表、 typed error，
+  `#![forbid(unsafe_code)]`）+ `net-bridge-native`（C ABI v1 shell，unsafe 与 FFI 集中于此）。
+- **C ABI v1**（ADR-0009）：唯一 bootstrap 导出 `netbridge_get_api(requested_major,
+  minimum_minor, out_api)`，返回 `NbApiV1` 函数表（struct_size/feature_bits 保留字段 + 12
+  个函数指针）；连接/服务端为 context 级 `u64` id；`nb_status_t` 统一错误码。
+- **NativeContext**（Rust）：实例级运行时所有权根——tokio runtime、连接/服务端注册表、 id 分配器、
+  `EventSink` 均为 context 字段；无进程级全局注册表。
+- **Java FFM 边界**：仅存在于 `nativebridge.internal.ffm` 包。`FfmNativeLibrary`
+  （shared Arena + `SymbolLookup.libraryLookup` + upcall stub）→ `FfmNativeContext`
+  （函数表下调用）→ `FfmNativeTransportBackend` 实现公共 seam
+  `NativeTransportBackend`。事件 upcall 绑定 `NativeEventDispatcher` 实例。
+- **composition root**：`NetBridgeServices` 仅持一个 `NetBridgeRuntime` root（config 服务 + backend +
+  `ClientRuntime` + `ServerRuntime`）。native 不可用时以
+  `UnavailableNativeTransportBackend` 降级，runtime 仍完整、TCP 可用。
 
 ## 传输协议
 
 - **QUIC 明文（quic-plaintext）**：QUIC 传输但关闭 TLS 加密；安全性由 Minecraft 自带加密流保证。动机：省一次加密握手开销。
-- **KCP 栈**（自外向内）：**FEC(RS) → KCP → smux**。
-  - **FEC / RS 码**：Reed-Solomon 前向纠错，最外层 UDP 包保护。实现在 `bridge/kcp/fec_stream.rs`。
-  - **KCP**：可靠低延迟 ARQ，stream 模式（字节流管道），kcp-rs 实现（内建 SYN 握手）。
-  - **smux**：多路流控层（原 `bridge/kcp/frame.rs` 控制字层已移除），滑动窗口 token 流控 + FIN 关闭语义；单条 MC 字节流占用一个 smux 流。
+- **KCP 栈**（自外向内）： **FEC (RS) → KCP → smux**。
+    - **FEC / RS 码**：Reed-Solomon 前向纠错，最外层 UDP 包保护。实现在
+      `net-bridge-core/src/transport/kcp/fec_stream.rs`。
+    - **KCP**：可靠低延迟 ARQ，stream 模式（字节流管道），kcp-rs 实现（内建 SYN 握手）。
+    - **smux**：多路流控层，滑动窗口 token 流控 + FIN 关闭语义；单条 MC 字节流占用一个 smux 流。
 - **KCP profile**：预设参数档，仅二档不支持自定义。配置串规范 `balance` / `aggressive`
   （Rust 解析兼容别名 `balanced`）：
-  - **balance**：nodelay=0/interval=40/resend=0/nc=0，mtu=1300，wnd=(256,256)，stream=true。
-  - **aggressive**：nodelay=1/interval=10/resend=2/nc=1，其余同上。
+    - **balance**：nodelay=0/interval=40/resend=0/nc=0，mtu=1300，wnd= (256,256)，stream=true。
+    - **aggressive**：nodelay=1/interval=10/resend=2/nc=1，其余同上。
+
+## 数据面（ADR-0009/0010）
+
+- **写路径**：Netty direct ByteBuf → `nioBuffer` 零拷贝借给 `NativeConnection.write`
+  → FFM downcall，Rust 在 downcall 返回前拷入自有 `Bytes` 队列；heap/composite 经一次 池化 direct
+  scratch。单 chunk 上限 64KiB，全收或全拒（`NB_WOULD_BLOCK` = 队列满）。
+- **读路径**：direct `ByteBuffer` 目标直写；无 Java heap `byte[]` 中转、无 JNI direct 特例。
+- **队列上限**：命令通道 4096、数据通道 8192 chunks，背压经 `NB_WOULD_BLOCK` 反馈。
+- **事件模型**：Rust 状态迁移/数据入队/写队列恢复/服务端 accept 经 `EventSink::on_event`
+  发出 `CONNECTION_STATE(1)/DATA_AVAILABLE(2)/WRITABLE(3)/ACCEPTED(4)/SERVER_STATE(5)`； Java
+  侧无任何轮询任务（channel poll、5ms accept 线程、ADOPT_EXECUTOR 均删除）。 DATA_AVAILABLE 在 Java
+  侧去抖合并；WRITABLE 解除写背压。
+- **事件线程纪律**：upcall 在 Rust Tokio worker；Java 回调只路由/marshal，不执行 Minecraft 业务、不阻塞。
+- **连接状态 ABI 值**：CONNECTING=1 / CONNECTED=2 / CLOSED=3 / FAILED=4（core 内部值+1）。
 
 ## 能力发现
 
 - **networks 能力**：服务端在列表 ping 响应 JSON 注入的顶层 `networks` 对象，每传输一个条目
-  `{enable, host, port, protocol}`（ADR-0001）。`enable` 缺失 = false；`host` 缺失/null = 跟随服务器地址；`features` 字段已废除。
-- **protocol 版本串**：`net-bri-quic/1`、`net-bri-kcp/1`。客户端精确比对自身支持集，
-  不支持的协议 → 该传输本地禁用（ADR-0001）。版本演进只看 protocol 串。
+  `{enable, host, port, protocol}`。`enable` 缺失 = false；`host` 缺失/null = 跟随服务器地址。 服务端由
+  `ServerTransportManager` 事务式启动后发布不可变 `NetworksAbility` 快照。
+- **protocol 版本串**：`net-bri-quic/1`、`net-bri-kcp/1`。客户端精确比对自身支持集， 不支持的协议 →
+  该传输本地禁用。版本演进只看 protocol 串。
 
 ## 客户端行为
 
-- **TransportMode**：三档 `tcp` / `quic` / `kcp`（ADR-0002）。quic/kcp 内置 TCP 降级，tcp 无降级概念。
-- **fallback（降级）**：单次连接流程内目标传输至多尝试 2 次（第 1 次超时 10 s、第 2 次 20 s，
-  native FAILED 立即计败），两败后本次连接改走 TCP（ADR-0002）。
-  所选传输未宣告/协议不支持 → 直接走 TCP，不尝试其他加速传输（ADR-0002 补充）。
-- **降级记忆**：按服务器地址记忆 fallback 结果，TTL 5 分钟；**命中即直接走 TCP、跳过全部
-  加速尝试**，过期后重新执行完整尝试序列（ADR-0002）。
-- **握手存活判定**：Java `HandshakeWatchdog` 竞速 connect promise（10s/20s）——quinn 黑洞下永不
-  自行失败（ADR-0008）。QUIC 的 CONNECTED = 明文握手完成；**KCP 的 CONNECTED = kcp-rs SYN
-  握手完成**（`connect_timeout` 8s 内无应答直接 FAILED，watchdog 兜底）。
-- **连接提示**：ConnectScreen 另起一行显示实际状态机文案——"正在建立 QUIC/KCP/TCP 连接"、
-  降级时"正在回退 TCP 连接"（ADR-0005）。服务器列表 tooltip 说明降级策略。
-- **F3 协议行**：单行 `[net-bridge] <QUIC|KCP|TCP> <addr>`，显示实际生效协议与连接地址（ADR-0005）。
+- **TransportMode**：三档 `tcp` / `quic` / `kcp`。quic/kcp 内置 TCP 降级，tcp 无降级概念。
+- **ConnectionPlanner**：纯决策对象，输入 mode × 能力宣告 × 最近成功缓存 × native 可用性，输出不可变
+  `ConnectionPlan`（`NativeAttemptPlan` 或 TCP-only）。所选传输未 宣告/协议不支持 → 直接 TCP，不尝试其他加速传输。
+- **ConnectionExecutor**：执行 plan——按 `NativeRetryPolicy`（至多 2 次尝试，10s/20s 看门狗）驱动 native
+  尝试、关闭失败尝试、记录成功端点、发布状态快照、最终经
+  `ConnectionExecutorAdapter.openTcp` 回落原版 TCP。
+- **SuccessfulEndpointCache**：按地址记录 TTL 5 分钟内的 **成功**加速端点，TTL 内同传输
+  重连跳过宣告协商；换模式立即失效；失败不写记忆。
+- **ServerCapabilityCache**：实例级 LRU（256），按地址缓存 ping 解析出的 networks 能力。
+- **连接状态快照**：`ConnectionStateStore` 发布不可变 `ConnectionSnapshot`
+  （CONNECTING/CONNECTED/FALLING_BACK/IDLE），ConnectScreen 与 F3 行只读快照，
+  `ConnectStatus`/`ConnectionDisplay` 静态类已删除。
+- **握手存活判定**：QUIC 的 CONNECTED = 明文握手完成； **KCP 的 CONNECTED = kcp-rs SYN 握手完成**（
+  `connect_timeout` 8s 内无应答直接 FAILED）。看门狗由
+  `ConnectionExecutor` 承载，超时 abort 连接并计入当次尝试失败。
+- **连接提示 / F3 行**：语义不变（ADR-0005），数据源改为 runtime 快照。
+
+## 服务端行为
+
+- **ServerRuntime / ServerTransportManager**：session-scoped、AutoCloseable；事务式
+  start（解析配置快照 → 逐传输 `backend.startServer` → 查询实际端口 → 原子发布 announcement；失败
+  reverse-close）。单传输 bind 失败不阻塞另一传输；两个都失败时 vanilla TCP 继续。
+- **ACCEPTED 驱动收养**：新连接经 `NativeConnectionAdopter` 在 adopt 执行器上收养进 MC 管线；adopt
+  失败关闭连接。无裸 long handle、无 5ms accept 轮询线程。
+- **服务端 `[quic]`/`[kcp]` 段**：`enable`（ **quic 默认 true，kcp 默认 false**）/ `bind` /
+  `host` / `port`（-1 跟随 MC 端口， **kcp 为 MC 端口+1**；0 随机；越界或 bind 失败→ 日志报错并禁用该传输）/
+  `max_connection`（默认 256，达限静默丢弃新客户端——防 UDP 反射，quic/kcp 独立计数）。ping 条目恒下发
+  **解析后的具体端口**。
 
 ## 配置
 
-- **nightconfig**：MC 生态 TOML 配置库。服务端 `config/net-bridge/server.toml`；客户端同目录 `config/net-bridge/client.toml`。
+- **nightconfig**：MC 生态 TOML 配置库。服务端 `config/net-bridge/server.toml`；客户端同目录
+  `config/net-bridge/client.toml`。
 - **游戏内切换按钮**：保留（多人游戏屏幕底部），与配置文件双向同步（读文件初始值、切换即写回）。
-- **服务端 `[quic]`/`[kcp]` 段**（字段一致）：`enable`（**quic 默认 true，kcp 默认 false**）/ `bind`（默认 0.0.0.0）/ `host`（null=跟随服务器地址）/ `port`（-1 跟随 MC 端口，**kcp 为 MC 端口+1**；0 随机；越界或 bind 失败→日志报错并禁用该传输）/ `max_connection`（默认 256，达限静默丢弃新客户端——防 UDP 反射，quic/kcp 独立计数）（ADR-0003）。ping 条目恒下发**解析后的具体端口**，-1/0 不上 wire（ADR-0001）。
-- **客户端 `mode`**：tcp（默认）/ quic / kcp；`[kcp] profile` = balance（默认）/ aggressive。系统属性 `netbridge.transport` 同名覆盖配置文件；旧取值（`quic-fallback` 等）废弃。无迁移（Alpha 硬切）。
+- **客户端 `mode`**：tcp（默认）/ quic / kcp；`[kcp] profile` = balance（默认）/ aggressive。系统属性
+  `netbridge.transport` 同名覆盖配置文件；旧取值（`quic-fallback` 等）废弃。
 
-## JNI 数据面
+## 打包与加载
 
-- **批量桥接口**：同步 `writeChunk(byte[], length)` / `readChunk(maxBytes)` / `readChunkInto(direct ByteBuffer)`
-  / `connectionState(conn)`；句柄式注册表。
-- **边界策略**（ADR-0004）：零拷贝仅限各语言内部（Rust 用 `Bytes`）；JNI 边界显式允许拷贝换内存安全。
-  `readChunkInto` 为唯一豁免的直接内存路径（SAFETY 论证完备，保留）；不新增其他直接内存变体。
-- **线程模型**（ADR-0006）：Netty EventLoop 自适应轮询——连接期固定 5ms；活跃期 5ms，
-  连续空转步进退避至 40ms 上限；拒绝回调/wakeup fd/每连接阻塞线程三方案。
-- 返回约定：入队字节数（0=队列满须重试）、读取数（0=暂无）、-1/null=非法或连接失效。
+- **内容寻址缓存**：打包资源经 sha256 内容寻址落盘 `~/.netbridge/native/<sha256>/<lib>`， 原子写入、跨启动复用；
+  `native/<platform>/manifest.json`（sha256/ABI/包版本）随 jar 分发， 抽取时校验。开发可用
+  `-Dnetbridge.native.path=<绝对路径>` 显式覆盖；生产不再回退
+  `java.library.path` / `System.load`。
+- **构建守卫**：`verifyArchitecture`（层纯净性/FFM 白名单/JNI 归零/@NullMarked 覆盖/ 副本不存在/Rust
+  core 纯净）、`verifyNativeSymbols`（业务导出仅
+  `netbridge_get_api`）、`generateNativeManifest`（sha256 + 头文件 ABI 常量）。
+- **CI**：java-unit（无 native）/ rust-unit（fmt+clippy -D warnings+test）/ abi-check（符号+布局+
+  `--illegal-native-access=deny` 下 FFM 集成）/ 全平台 native matrix → package（Java 25）→
+  release；publish 依赖全部前置 job。

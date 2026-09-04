@@ -10,42 +10,13 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use super::config::{KcpProfile, build_config};
-use super::connection::run_kcp_connection;
 use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
-use crate::registry::{allocate_id, conns, remove_conn, report_error, runtime};
+use crate::report_error;
 use crate::socket_util;
 use crate::{
     Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED, guarded,
 };
-
-/// 发起 KCP 连接（异步建立，立即返回连接 id）。
-pub fn connect(host: &str, port: u16, profile: KcpProfile) -> Result<u64, BridgeError> {
-    let Some(rt) = runtime() else {
-        return Err(BridgeError::RuntimeUnavailable);
-    };
-    let (conn_id, state, to_java_tx, to_transport_rx) = register_client();
-    let host = host.to_string();
-    rt.spawn(async move {
-        let panicked = guarded("kcp connect task", async move {
-            connect_task(
-                conn_id,
-                state,
-                host,
-                port,
-                profile,
-                to_transport_rx,
-                to_java_tx,
-            )
-            .await;
-        })
-        .await;
-        if panicked {
-            remove_conn(conn_id);
-        }
-    });
-    Ok(conn_id)
-}
 
 /// 经 NativeContext 发起 KCP 客户端连接。
 pub fn connect_in_context(
@@ -78,14 +49,16 @@ pub fn connect_in_context(
     let ok_task = Arc::clone(&connected_ok);
     let state_outer = Arc::clone(&state);
     ctx.handle().spawn(async move {
+        let ctx_task = Arc::clone(&ctx_clone);
         let panicked = guarded("kcp connect task in context", async move {
-            let Some(addr) = resolve_host(conn_id, &state, &host, port).await else {
+            let Some(addr) = resolve_host(&ctx_task, conn_id, &state, &host, port).await else {
                 return;
             };
-            let Some(udp) = client_udp(conn_id, &state, addr) else {
+            let Some(udp) = client_udp(&ctx_task, conn_id, &state, addr) else {
                 return;
             };
-            let Some(stream) = establish_kcp(conn_id, &state, addr, udp, profile).await else {
+            let Some(stream) = establish_kcp(&ctx_task, conn_id, &state, addr, udp, profile).await
+            else {
                 return;
             };
             ok_task.store(true, Ordering::SeqCst);
@@ -135,65 +108,8 @@ pub fn connect_in_context(
     Ok(conn_id)
 }
 
-fn register_client() -> (
-    u64,
-    Arc<AtomicU32>,
-    mpsc::Sender<Bytes>,
-    mpsc::Receiver<Command>,
-) {
-    let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
-    let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
-    let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
-    let conn_id = allocate_id();
-    conns().insert(
-        conn_id,
-        ConnHandle::new(
-            state.clone(),
-            to_java_rx,
-            to_transport_tx,
-            None,
-            None,
-            true,
-            true,
-            None,
-        ),
-    );
-    (conn_id, state, to_java_tx, to_transport_rx)
-}
-
-async fn connect_task(
-    conn_id: u64,
-    state: Arc<AtomicU32>,
-    host: String,
-    port: u16,
-    profile: KcpProfile,
-    to_transport_rx: mpsc::Receiver<Command>,
-    to_java_tx: mpsc::Sender<Bytes>,
-) {
-    let Some(addr) = resolve_host(conn_id, &state, &host, port).await else {
-        return;
-    };
-    let Some(udp) = client_udp(conn_id, &state, addr) else {
-        return;
-    };
-    let Some(stream) = establish_kcp(conn_id, &state, addr, udp, profile).await else {
-        return;
-    };
-    if state.load(Ordering::SeqCst) != STATE_CLOSED {
-        state.store(STATE_CONNECTED, Ordering::SeqCst);
-    }
-    run_kcp_connection(
-        conn_id,
-        FecStream::new(stream),
-        to_transport_rx,
-        to_java_tx,
-        state,
-        true,
-    )
-    .await;
-}
-
 async fn resolve_host(
+    ctx: &crate::context::NativeContext,
     conn_id: u64,
     state: &Arc<AtomicU32>,
     host: &str,
@@ -202,6 +118,7 @@ async fn resolve_host(
     match tokio::net::lookup_host((host, port)).await {
         Ok(mut addrs) => addrs.next().or_else(|| {
             fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Dns {
@@ -217,6 +134,7 @@ async fn resolve_host(
         }),
         Err(source) => {
             fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Dns {
@@ -230,11 +148,17 @@ async fn resolve_host(
     }
 }
 
-fn client_udp(conn_id: u64, state: &Arc<AtomicU32>, addr: SocketAddr) -> Option<UdpSocket> {
+fn client_udp(
+    ctx: &crate::context::NativeContext,
+    conn_id: u64,
+    state: &Arc<AtomicU32>,
+    addr: SocketAddr,
+) -> Option<UdpSocket> {
     let socket = match socket_util::bind_client(addr.is_ipv6()) {
         Ok(s) => s,
         Err(e) => {
             fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Setup {
@@ -253,6 +177,7 @@ fn client_udp(conn_id: u64, state: &Arc<AtomicU32>, addr: SocketAddr) -> Option<
         Ok(udp) => Some(udp),
         Err(e) => {
             fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Setup {
@@ -267,6 +192,7 @@ fn client_udp(conn_id: u64, state: &Arc<AtomicU32>, addr: SocketAddr) -> Option<
 }
 
 async fn establish_kcp(
+    ctx: &crate::context::NativeContext,
     conn_id: u64,
     state: &Arc<AtomicU32>,
     addr: SocketAddr,
@@ -278,6 +204,7 @@ async fn establish_kcp(
         Ok((stream, _)) => Some(stream),
         Err(e) => {
             fail(
+                ctx,
                 conn_id,
                 state,
                 BridgeError::Connect {
@@ -291,8 +218,13 @@ async fn establish_kcp(
     }
 }
 
-fn fail(conn_id: u64, state: &Arc<AtomicU32>, err: BridgeError) {
+fn fail(
+    ctx: &crate::context::NativeContext,
+    conn_id: u64,
+    state: &Arc<AtomicU32>,
+    err: BridgeError,
+) {
+    ctx.remove_conn(conn_id);
     state.store(STATE_FAILED, Ordering::SeqCst);
-    remove_conn(conn_id);
     report_error(err.message());
 }

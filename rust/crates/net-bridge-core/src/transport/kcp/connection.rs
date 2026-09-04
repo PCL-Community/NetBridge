@@ -10,8 +10,8 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc;
 
 use super::fec_stream::FecStream;
-use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE, get_event_sink};
-use crate::registry::{remove_conn, report_error};
+use crate::event::{EventSink, NB_EVENT_CONNECTION_STATE, NB_EVENT_DATA_AVAILABLE};
+use crate::report_error;
 use crate::{Command, STATE_CLOSED, STATE_FAILED, guarded};
 
 type KcpFec = FecStream<KcpStream>;
@@ -21,29 +21,6 @@ fn smux_config() -> Result<Config, String> {
         .max_frame_size(64 * 1024)
         .build()
         .map_err(|e| format!("smux config build failed: {e}"))
-}
-
-pub async fn run_kcp_connection(
-    conn_id: u64,
-    fec: KcpFec,
-    to_kcp_rx: mpsc::Receiver<Command>,
-    to_java_tx: mpsc::Sender<Bytes>,
-    state: Arc<AtomicU32>,
-    client_side: bool,
-) {
-    run_kcp_connection_with_sink(
-        conn_id,
-        fec,
-        to_kcp_rx,
-        to_java_tx,
-        state,
-        client_side,
-        get_event_sink().clone(),
-        Box::new(|id| {
-            remove_conn(id);
-        }),
-    )
-    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
