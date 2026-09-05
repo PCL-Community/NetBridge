@@ -14,7 +14,7 @@ use super::fec_stream::FecStream;
 use crate::error::{BridgeError, Transport};
 use crate::report_error;
 use crate::socket_util;
-use crate::{Command, ConnHandle, STATE_CLOSED, STATE_CONNECTED, STATE_CONNECTING, STATE_FAILED};
+use crate::{Command, ConnHandle, STATE_CONNECTING, STATE_FAILED};
 
 /// 经 NativeContext 发起 KCP 客户端连接。
 pub fn connect_in_context(
@@ -26,6 +26,7 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let Ok(conn_id) = ctx.allocate_id() else {
         return Err(BridgeError::IdOverflow);
     };
@@ -35,6 +36,7 @@ pub fn connect_in_context(
             state.clone(),
             to_java_rx,
             to_transport_tx,
+            cancel_tx,
             None,
             None,
             true,
@@ -54,19 +56,32 @@ pub fn connect_in_context(
         else {
             return;
         };
-        if state.load(Ordering::SeqCst) != STATE_CLOSED {
-            state.store(STATE_CONNECTED, Ordering::SeqCst);
+        ctx_task.set_conn_remote_addr(conn_id, addr);
+        let Some((mc_stream, session)) = super::connection::prepare_kcp_data_plane(
+            conn_id,
+            FecStream::new(stream),
+            true,
+            &state,
+            &ctx_task,
+        )
+        .await
+        else {
+            return;
+        };
+        if state.load(Ordering::SeqCst) != crate::STATE_CLOSED {
+            state.store(crate::STATE_CONNECTED, Ordering::SeqCst);
             ctx_task.event_sink().on_event(
                 crate::event::NB_EVENT_CONNECTION_STATE,
                 conn_id,
-                crate::event::abi_connection_state(STATE_CONNECTED) as i64,
+                crate::event::abi_connection_state(crate::STATE_CONNECTED) as i64,
                 0,
             );
         }
-        ctx_task.set_conn_remote_addr(conn_id, addr);
         super::connection::run_kcp_connection_with_sink(
             conn_id,
-            FecStream::new(stream),
+            mc_stream,
+            session,
+            cancel_rx,
             to_transport_rx,
             to_java_tx,
             state,

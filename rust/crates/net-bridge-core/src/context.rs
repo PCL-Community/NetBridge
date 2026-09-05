@@ -127,10 +127,11 @@ impl NativeContext {
         handle.state.store(STATE_CLOSED, Ordering::SeqCst);
         handle.terminal_sent.store(true, Ordering::SeqCst);
         let to_transport = handle.to_transport.clone();
+        let _ = handle.cancel_tx.send(true);
         drop(handle);
-        let ok = to_transport.try_send(Command::Close).is_ok();
+        let _ = to_transport.try_send(Command::Close);
         self.remove_conn(conn);
-        ok
+        true
     }
 
     /// 终态事件（FAILED/CLOSED）恰好一次；entry 保留为 tombstone 直到 Java release。
@@ -241,6 +242,11 @@ impl NativeContext {
             Ok(()) => Ok(len),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 write_blocked.store(true, Ordering::SeqCst);
+                // Double check to prevent lost-wakeup race if consumer drained just before store
+                if to_transport.capacity() > 0 && write_blocked.swap(false, Ordering::SeqCst) {
+                    self.event_sink()
+                        .on_event(crate::event::NB_EVENT_WRITABLE, conn, 0, 0);
+                }
                 Ok(0)
             }
             Err(_) => Err(BridgeError::ConnectionClosed),
@@ -305,18 +311,6 @@ impl NativeContext {
             TransportEndpoint::Quic(endpoint) => endpoint.close(0u32.into(), b"net-bridge stop"),
             TransportEndpoint::Kcp(stop_tx) => {
                 let _ = stop_tx.try_send(());
-            }
-        }
-        let conn_ids: Vec<u64> = self
-            .connections
-            .iter()
-            .filter(|e| e.server_id == Some(server))
-            .map(|e| *e.key())
-            .collect();
-        for id in conn_ids {
-            if let Some(h) = self.connections.get_mut(&id) {
-                h.state.store(STATE_CLOSED, Ordering::SeqCst);
-                let _ = h.to_transport.try_send(Command::Close);
             }
         }
         true
@@ -577,6 +571,10 @@ mod tests {
                 },
                 {
                     let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                    tx
+                },
+                {
+                    let (tx, _rx) = tokio::sync::watch::channel(false);
                     tx
                 },
                 None,

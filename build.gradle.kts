@@ -149,6 +149,7 @@ val verifyArchitecture = tasks.register("verifyArchitecture") {
         )
         val mixinGuardAllowlist = setOf(
             "minecraft/src/main/java/top/tangge233/netbridge/mixin/ConnectionMixin.java",
+            "minecraft/src/main/java/top/tangge233/netbridge/mc/NativeClientTransport.java",
             "common/src/main/java/top/tangge233/netbridge/ability/StatusNetworksCapture.java"
         )
 

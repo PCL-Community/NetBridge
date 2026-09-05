@@ -17,6 +17,7 @@ public final class FfmNativeContext implements AutoCloseable {
 
     private static final int DRAIN_TIMEOUT_MILLIS = 10_000;
 
+    private final @Nullable FfmNativeLibrary ownerLibrary;
     private final FfmApiV1 api;
     private final MemorySegment contextPtr;
     private final NativeEventDispatcher dispatcher;
@@ -30,6 +31,16 @@ public final class FfmNativeContext implements AutoCloseable {
             MemorySegment contextPtr,
             NativeEventDispatcher dispatcher
     ) {
+        this(null, api, contextPtr, dispatcher);
+    }
+
+    public FfmNativeContext(
+            @Nullable FfmNativeLibrary ownerLibrary,
+            FfmApiV1 api,
+            MemorySegment contextPtr,
+            NativeEventDispatcher dispatcher
+    ) {
+        this.ownerLibrary = ownerLibrary;
         this.api = api;
         this.contextPtr = contextPtr;
         this.dispatcher = dispatcher;
@@ -478,6 +489,9 @@ public final class FfmNativeContext implements AutoCloseable {
         shutdownLocked(2000);
         destroyLocked();
         destroyed = true;
+        if (ownerLibrary != null) {
+            ownerLibrary.unregisterContext(this);
+        }
     }
 
     private void awaitDrain() {

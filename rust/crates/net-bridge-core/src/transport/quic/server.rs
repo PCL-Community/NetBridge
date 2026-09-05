@@ -99,11 +99,13 @@ async fn serve_incoming_in_context(
         return;
     }
     let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let Ok(conn_id) = ctx.allocate_id() else {
         conn_counter.fetch_sub(1, Ordering::Relaxed);
         return;
     };
-    if !ctx.servers_map().contains_key(&server_id) {
+    let server_running = ctx.servers_map().contains_key(&server_id);
+    if !server_running {
         conn_counter.fetch_sub(1, Ordering::Relaxed);
         return;
     }
@@ -115,6 +117,7 @@ async fn serve_incoming_in_context(
             state.clone(),
             to_java_rx,
             to_transport_tx.clone(),
+            cancel_tx,
             Some(server_id),
             Some(conn_counter),
             true,
@@ -136,6 +139,7 @@ async fn serve_incoming_in_context(
                 super::connection::run_connection_with_sink(
                     conn_id,
                     conn,
+                    cancel_rx,
                     send,
                     recv,
                     to_transport_rx,

@@ -18,6 +18,7 @@ public final class FfmNativeTransportBackend
     private final Map<Long, FfmNativeConnection> connections = new ConcurrentHashMap<>();
     private final Map<Long, FfmNativeServer> servers = new ConcurrentHashMap<>();
     private final Map<Long, List<Long>> pendingAccepted = new ConcurrentHashMap<>();
+    private final Map<Long, NativeConnectionState> pendingConnectionStates = new ConcurrentHashMap<>();
     private final AtomicBoolean closeOnce = new AtomicBoolean(false);
 
     private volatile NativeBackendState state = NativeBackendState.NEW;
@@ -118,12 +119,16 @@ public final class FfmNativeTransportBackend
         var buffered = pendingAccepted.remove(serverId);
         if (buffered != null) {
             buffered.forEach(connId -> {
+                var earlyState = pendingConnectionStates.remove(connId);
+                var initialState = earlyState != null
+                        ? earlyState
+                        : NativeConnectionState.CONNECTED;
                 var acceptedConn = new FfmNativeConnection(
                         this,
                         connId,
                         server,
                         kind,
-                        NativeConnectionState.CONNECTED
+                        initialState
                 );
                 connections.put(connId, acceptedConn);
                 server.handleAccepted(acceptedConn);
@@ -201,8 +206,11 @@ public final class FfmNativeTransportBackend
             switch (event.eventKind()) {
                 case NativeEvent.KIND_CONNECTION_STATE -> {
                     var conn = connections.get(event.objectId());
+                    var mappedState = NativeConnectionState.fromAbi((int) event.arg0());
                     if (conn != null) {
-                        conn.handleStateChanged(NativeConnectionState.fromAbi((int) event.arg0()));
+                        conn.handleStateChanged(mappedState);
+                    } else {
+                        pendingConnectionStates.put(event.objectId(), mappedState);
                     }
                 }
                 case NativeEvent.KIND_DATA_AVAILABLE -> {

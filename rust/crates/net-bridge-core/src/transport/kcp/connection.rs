@@ -28,11 +28,13 @@ fn smux_config() -> Result<Config, String> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_kcp_connection_with_sink(
     conn_id: u64,
-    fec: KcpFec,
+    stream: smux::Stream,
+    session: Arc<Session>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
     to_kcp_rx: mpsc::Receiver<Command>,
     to_java_tx: mpsc::Sender<Bytes>,
     state: Arc<AtomicU32>,
-    client_side: bool,
+    _client_side: bool,
     ctx: Arc<NativeContext>,
 ) {
     let write_blocked = ctx
@@ -41,13 +43,6 @@ pub async fn run_kcp_connection_with_sink(
         .map(|h| h.write_blocked.clone())
         .unwrap_or_default();
     let sink = Arc::clone(ctx.event_sink());
-    let Some(session) = create_session(conn_id, fec, client_side, &state, &ctx).await else {
-        return;
-    };
-    let Some(stream) = open_mc_stream(conn_id, &session, client_side, &state, &ctx).await else {
-        return;
-    };
-
     let (stream_r, stream_w) = tokio::io::split(stream);
     let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<bool>(1);
     let done_guard = reader_done_tx.clone();
@@ -70,6 +65,7 @@ pub async fn run_kcp_connection_with_sink(
         conn_id,
         stream_w,
         &session,
+        cancel_rx,
         to_kcp_rx,
         &mut reader_done_rx,
         &state,
@@ -81,48 +77,46 @@ pub async fn run_kcp_connection_with_sink(
     reader.abort();
 }
 
-async fn create_session(
+pub async fn prepare_kcp_data_plane(
     conn_id: u64,
     fec: KcpFec,
     client_side: bool,
     state: &AtomicU32,
     ctx: &Arc<NativeContext>,
-) -> Option<Session> {
+) -> Option<(smux::Stream, Arc<Session>)> {
     let config = match smux_config() {
         Ok(config) => config,
         Err(msg) => return request_fail(conn_id, state, Err(msg), ctx),
     };
-    let result = if client_side {
+    let session_res = if client_side {
         Session::client(fec, config).await
     } else {
         Session::server(fec, config).await
     };
-    request_fail(
+    let session = match request_fail(
         conn_id,
         state,
-        result.map_err(|e| format!("smux session setup failed: {e}")),
+        session_res.map_err(|e| format!("smux session setup failed: {e}")),
         ctx,
-    )
-}
-
-async fn open_mc_stream(
-    conn_id: u64,
-    session: &Session,
-    client_side: bool,
-    state: &AtomicU32,
-    ctx: &Arc<NativeContext>,
-) -> Option<smux::Stream> {
-    let result = if client_side {
+    ) {
+        Some(s) => Arc::new(s),
+        None => return None,
+    };
+    let stream_res = if client_side {
         session.open_stream().await
     } else {
         session.accept_stream().await
     };
-    request_fail(
+    let stream = match request_fail(
         conn_id,
         state,
-        result.map_err(|e| format!("smux stream setup failed: {e}")),
+        stream_res.map_err(|e| format!("smux stream setup failed: {e}")),
         ctx,
-    )
+    ) {
+        Some(st) => st,
+        None => return None,
+    };
+    Some((stream, session))
 }
 
 fn request_fail<T>(
@@ -177,6 +171,7 @@ async fn drive(
     conn_id: u64,
     mut stream_w: WriteHalf<smux::Stream>,
     session: &Session,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
     mut cmds: mpsc::Receiver<Command>,
     reader_done: &mut mpsc::Receiver<bool>,
     state: &AtomicU32,
@@ -188,8 +183,9 @@ async fn drive(
             break;
         }
         tokio::select! {
-            biased;
-
+            _ = cancel_rx.changed() => {
+                break;
+            }
             done = reader_done.recv() => {
                 if done == Some(false) {
                     state.store(STATE_FAILED, Ordering::SeqCst);

@@ -123,13 +123,21 @@ async fn accept_loop_in_context(
         if !admit(&conn_count, max_connections) {
             continue;
         }
-        let (to_transport_tx, to_transport_rx) = mpsc::channel::<crate::Command>(4096);
-        let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
         let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
         let Ok(conn_id) = ctx.allocate_id() else {
             conn_count.fetch_sub(1, Ordering::Relaxed);
             continue;
         };
+        let kcp_fec = FecStream::new(stream);
+        let Some((mc_stream, session)) =
+            super::connection::prepare_kcp_data_plane(conn_id, kcp_fec, false, &state, &ctx).await
+        else {
+            conn_count.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        };
+        let (to_transport_tx, to_transport_rx) = mpsc::channel::<crate::Command>(4096);
+        let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         if !ctx.servers_map().contains_key(&server_id) {
             conn_count.fetch_sub(1, Ordering::Relaxed);
             continue;
@@ -140,6 +148,7 @@ async fn accept_loop_in_context(
                 state.clone(),
                 to_java_rx,
                 to_transport_tx,
+                cancel_tx,
                 Some(server_id),
                 Some(Arc::clone(&conn_count)),
                 false,
@@ -159,7 +168,9 @@ async fn accept_loop_in_context(
             conn_id,
             super::connection::run_kcp_connection_with_sink(
                 conn_id,
-                FecStream::new(stream),
+                mc_stream,
+                session,
+                cancel_rx,
                 to_transport_rx,
                 to_java_tx,
                 state,

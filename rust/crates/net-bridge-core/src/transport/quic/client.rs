@@ -21,6 +21,7 @@ pub fn connect_in_context(
     let (to_transport_tx, to_transport_rx) = mpsc::channel::<Command>(4096);
     let (to_java_tx, to_java_rx) = mpsc::channel::<Bytes>(8192);
     let state = Arc::new(AtomicU32::new(STATE_CONNECTING));
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let conn_id = ctx.allocate_id()?;
     ctx.conns().insert(
         conn_id,
@@ -28,6 +29,7 @@ pub fn connect_in_context(
             state.clone(),
             to_java_rx,
             to_transport_tx.clone(),
+            cancel_tx,
             None,
             None,
             true,
@@ -39,6 +41,7 @@ pub fn connect_in_context(
     let ctx_task = Arc::clone(ctx);
     ctx.spawn_connection_task("quic connect task in context", conn_id, async move {
         if let Some((conn, send, recv)) = establish(&ctx_task, &host, port, conn_id, &state).await {
+            ctx_task.set_conn_remote_addr(conn_id, conn.remote_address());
             state.store(STATE_CONNECTED, Ordering::SeqCst);
             ctx_task.event_sink().on_event(
                 crate::event::NB_EVENT_CONNECTION_STATE,
@@ -49,6 +52,7 @@ pub fn connect_in_context(
             super::connection::run_connection_with_sink(
                 conn_id,
                 conn,
+                cancel_rx,
                 send,
                 recv,
                 to_transport_rx,
@@ -127,7 +131,6 @@ async fn establish(
         cancel(ctx, conn_id, state);
         return None;
     }
-    ctx.set_conn_remote_addr(conn_id, addr);
     Some((conn, send, recv))
 }
 

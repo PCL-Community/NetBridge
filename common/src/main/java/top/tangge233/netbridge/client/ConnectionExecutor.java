@@ -203,6 +203,7 @@ public final class ConnectionExecutor {
             }
             return;
         }
+
         if (!retryable) {
             NetBridge.LOGGER.warn(
                     "Transport error to {} is non-retryable ({}); falling back to TCP",
@@ -218,6 +219,11 @@ public final class ConnectionExecutor {
                     causeMessage
             );
         }
+
+        if (result.isAttemptCancelled()) {
+            return;
+        }
+
         var tcpFuture = fallbackToTcp(plan, adapter);
         result.setDelegate(tcpFuture, true);
     }

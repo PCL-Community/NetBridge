@@ -13,7 +13,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class NativeClientTransport {
 
+    private static final ThreadLocal<Boolean> VANILLA_BYPASS =
+            ThreadLocal.withInitial(() -> Boolean.FALSE);
+
     private NativeClientTransport() {
+    }
+
+    public static boolean isVanillaBypass() {
+        return VANILLA_BYPASS.get();
     }
 
     public static ChannelFuture connectWithFallback(
@@ -75,11 +82,16 @@ public final class NativeClientTransport {
 
         @Override
         public ChannelFuture openTcp(InetSocketAddress address) {
-            return Connection.connect(
-                    address,
-                    useEpoll,
-                    connection
-            );
+            VANILLA_BYPASS.set(Boolean.TRUE);
+            try {
+                return Connection.connect(
+                        address,
+                        useEpoll,
+                        connection
+                );
+            } finally {
+                VANILLA_BYPASS.remove();
+            }
         }
 
     }

@@ -1,6 +1,5 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
-import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.util.Set;
@@ -63,17 +62,6 @@ public final class FfmNativeServer implements NativeServer {
         } catch (RuntimeException e) {
             throw new NativeException("failed to stop native server " + id, e);
         } finally {
-            acceptedChildren.forEach(conn -> {
-                try {
-                    conn.close();
-                } catch (RuntimeException e) {
-                    NetBridge.LOGGER.warn(
-                            "Error closing accepted connection {}: {}",
-                            conn.id(),
-                            e.getMessage()
-                    );
-                }
-            });
             acceptedChildren.clear();
             owner.unregisterServer(id);
         }

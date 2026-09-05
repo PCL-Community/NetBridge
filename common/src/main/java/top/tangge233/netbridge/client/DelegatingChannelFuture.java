@@ -19,15 +19,13 @@ import org.jspecify.annotations.Nullable;
 
 final class DelegatingChannelFuture implements ChannelFuture {
 
-    private final AtomicReference<ChannelFuture> delegate = new AtomicReference<>();
+    private final AtomicReference<@Nullable ChannelFuture> delegate = new AtomicReference<>();
     private final AtomicBoolean terminal = new AtomicBoolean(false);
-    private final AtomicBoolean listenersFired = new AtomicBoolean(false);
+    private final AtomicBoolean cancelled = new AtomicBoolean(false);
     private final List<GenericFutureListener<? extends Future<? super Void>>> listeners =
             new CopyOnWriteArrayList<>();
-    private final EventLoopGroup executorGroup;
 
-    DelegatingChannelFuture(EventLoopGroup executorGroup) {
-        this.executorGroup = executorGroup;
+    DelegatingChannelFuture(EventLoopGroup _executorGroup) {
     }
 
     void setDelegate(ChannelFuture future, boolean isTerminal) {
@@ -38,10 +36,6 @@ final class DelegatingChannelFuture implements ChannelFuture {
     }
 
     private void fireListeners() {
-        if (!listenersFired.compareAndSet(false, true)) {
-            return;
-        }
-
         for (var listener : listeners) {
             try {
                 @SuppressWarnings({"unchecked", "rawtypes"})
@@ -59,10 +53,14 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
     @Override
     public Channel channel() {
-        return current().channel();
+        var cur = current();
+        if (cur == null) {
+            throw new IllegalStateException("Channel not yet initialized on delegating future");
+        }
+        return cur.channel();
     }
 
-    private ChannelFuture current() {
+    private @Nullable ChannelFuture current() {
         return delegate.get();
     }
 
@@ -71,11 +69,22 @@ final class DelegatingChannelFuture implements ChannelFuture {
             GenericFutureListener<? extends Future<? super Void>> listener
     ) {
         listeners.add(listener);
+        var cur = current();
         if (terminal.get()
-                && current().isDone()
-                && listenersFired.get()
+                && cur != null
+                && cur.isDone()
         ) {
-            fireListeners();
+            try {
+                @SuppressWarnings({"unchecked", "rawtypes"})
+                var raw = (GenericFutureListener) listener;
+                raw.operationComplete(this);
+            } catch (Exception e) {
+                NetBridge.LOGGER.warn(
+                        "DelegatingChannelFuture listener failed: {}",
+                        e.getMessage(),
+                        e
+                );
+            }
         }
         return this;
     }
@@ -120,30 +129,46 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
     @Override
     public boolean isSuccess() {
-        return terminal.get() && current().isSuccess();
+        var cur = current();
+        return terminal.get()
+                && cur != null
+                && cur.isSuccess();
     }
 
     @Override
     public boolean isCancellable() {
-        return !terminal.get() && current().isCancellable();
+        var cur = current();
+        return !terminal.get()
+                && (cur == null || cur.isCancellable());
     }
 
     @Override
     public @Nullable Throwable cause() {
-        return terminal.get() && current().isDone()
-                ? current().cause()
+        var cur = current();
+        return terminal.get() && cur != null && cur.isDone()
+                ? cur.cause()
                 : null;
     }
 
     @Override
-    public boolean await(long timeout, TimeUnit unit) throws InterruptedException {
+    public boolean await(
+            long timeout,
+            TimeUnit unit
+    ) throws InterruptedException {
         var deadline = System.nanoTime() + unit.toNanos(timeout);
         while (!isDone()) {
             if (System.nanoTime() > deadline) {
                 return isDone();
             }
-            current().await(20, TimeUnit.MILLISECONDS);
+
+            var cur = current();
+            if (cur != null) {
+                cur.await(20, TimeUnit.MILLISECONDS);
+            } else {
+                Thread.sleep(10);
+            }
         }
+
         return true;
     }
 
@@ -159,14 +184,28 @@ final class DelegatingChannelFuture implements ChannelFuture {
             if (System.nanoTime() > deadline) {
                 return isDone();
             }
-            current().awaitUninterruptibly(20, TimeUnit.MILLISECONDS);
+
+            var cur = current();
+            if (cur != null) {
+                cur.awaitUninterruptibly(20, TimeUnit.MILLISECONDS);
+            } else {
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException _) {
+                    // uninterruptible loop
+                }
+            }
         }
+
         return true;
     }
 
     @Override
     public boolean awaitUninterruptibly(long timeoutMillis) {
-        return awaitUninterruptibly(timeoutMillis, TimeUnit.MILLISECONDS);
+        return awaitUninterruptibly(
+                timeoutMillis,
+                TimeUnit.MILLISECONDS
+        );
     }
 
     @Override
@@ -176,7 +215,22 @@ final class DelegatingChannelFuture implements ChannelFuture {
 
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
-        return current().cancel(mayInterruptIfRunning);
+        if (terminal.get()) {
+            return false;
+        }
+
+        if (cancelled.compareAndSet(false, true)) {
+            var cur = current();
+            if (cur != null) {
+                cur.cancel(mayInterruptIfRunning);
+            }
+            if (terminal.compareAndSet(false, true)) {
+                fireListeners();
+            }
+            return true;
+        }
+
+        return false;
     }
 
     @Override
@@ -194,7 +248,12 @@ final class DelegatingChannelFuture implements ChannelFuture {
     @Override
     public ChannelFuture await() throws InterruptedException {
         while (!isDone()) {
-            current().await();
+            var cur = current();
+            if (cur != null) {
+                cur.await(20, TimeUnit.MILLISECONDS);
+            } else {
+                Thread.sleep(10);
+            }
         }
         return this;
     }
@@ -202,7 +261,16 @@ final class DelegatingChannelFuture implements ChannelFuture {
     @Override
     public ChannelFuture awaitUninterruptibly() {
         while (!isDone()) {
-            current().awaitUninterruptibly();
+            var cur = current();
+            if (cur != null) {
+                cur.awaitUninterruptibly(20, TimeUnit.MILLISECONDS);
+            } else {
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException _) {
+                    // ignore
+                }
+            }
         }
         return this;
     }
@@ -212,14 +280,22 @@ final class DelegatingChannelFuture implements ChannelFuture {
         return false;
     }
 
+    public boolean isAttemptCancelled() {
+        return cancelled.get();
+    }
+
     @Override
     public boolean isCancelled() {
-        return terminal.get() && current().isCancelled();
+        var cur = current();
+        return cancelled.get()
+                || (terminal.get() && cur != null && cur.isCancelled());
     }
 
     @Override
     public boolean isDone() {
-        return terminal.get() && current().isDone();
+        var cur = current();
+        return cancelled.get()
+                || (terminal.get() && cur != null && cur.isDone());
     }
 
     @Override

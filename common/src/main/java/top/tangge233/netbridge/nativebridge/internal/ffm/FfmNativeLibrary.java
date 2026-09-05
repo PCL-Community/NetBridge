@@ -6,15 +6,16 @@ import java.lang.invoke.MethodType;
 import java.nio.file.Path;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class FfmNativeLibrary implements AutoCloseable {
 
     private final Arena arena;
     private final SymbolLookup lookup;
     private final FfmApiV1 api;
-    private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final Object stateLock = new Object();
     private final Set<FfmNativeContext> activeContexts = ConcurrentHashMap.newKeySet();
+    private State state = State.OPEN;
+    private int creatingContexts = 0;
 
     private FfmNativeLibrary(
             Arena arena,
@@ -69,7 +70,13 @@ public final class FfmNativeLibrary implements AutoCloseable {
     }
 
     public FfmNativeContext createContext(int workerThreads) {
-        ensureOpen();
+        synchronized (stateLock) {
+            if (state != State.OPEN) {
+                throw new IllegalStateException("FfmNativeLibrary is " + state);
+            }
+            creatingContexts++;
+        }
+
         try (var localArena = Arena.ofConfined()) {
             var dispatcher = new NativeEventDispatcher();
             var mh = MethodHandles.lookup().bind(
@@ -133,7 +140,13 @@ public final class FfmNativeLibrary implements AutoCloseable {
             if (ctxAddr.equals(MemorySegment.NULL)) {
                 throw new IllegalStateException("context_create returned null context pointer");
             }
-            var ctx = new FfmNativeContext(api, ctxAddr, dispatcher);
+
+            var ctx = new FfmNativeContext(
+                    this,
+                    api,
+                    ctxAddr,
+                    dispatcher
+            );
             activeContexts.add(ctx);
             return ctx;
         } catch (Throwable t) {
@@ -141,12 +154,32 @@ public final class FfmNativeLibrary implements AutoCloseable {
                 throw re;
             }
             throw new RuntimeException("createContext failed", t);
+        } finally {
+            synchronized (stateLock) {
+                creatingContexts--;
+                stateLock.notifyAll();
+            }
+        }
+    }
+
+    void unregisterContext(FfmNativeContext context) {
+        activeContexts.remove(context);
+        synchronized (stateLock) {
+            stateLock.notifyAll();
         }
     }
 
     private void ensureOpen() {
-        if (closed.get()) {
-            throw new IllegalStateException("FfmNativeLibrary is closed");
+        synchronized (stateLock) {
+            if (state != State.OPEN) {
+                throw new IllegalStateException("FfmNativeLibrary is " + state);
+            }
+        }
+    }
+
+    public State state() {
+        synchronized (stateLock) {
+            return state;
         }
     }
 
@@ -160,18 +193,58 @@ public final class FfmNativeLibrary implements AutoCloseable {
 
     @Override
     public void close() {
-        if (!closed.compareAndSet(false, true)) {
-            return;
+        synchronized (stateLock) {
+            if (state == State.CLOSED) {
+                return;
+            }
+
+            state = State.CLOSING;
+            while (creatingContexts > 0) {
+                try {
+                    stateLock.wait(20);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                            "Interrupted while waiting for in-flight context creations",
+                            e
+                    );
+                }
+            }
         }
+
+        Throwable firstError = null;
         for (var ctx : activeContexts) {
             try {
                 ctx.close();
-            } catch (Throwable _) {
-                // Keep closing other contexts
+            } catch (Throwable t) {
+                if (firstError == null) {
+                    firstError = t;
+                }
             }
         }
-        activeContexts.clear();
+
+        if (firstError != null || !activeContexts.isEmpty()) {
+            throw new IllegalStateException(
+                    "Cannot safely close FfmNativeLibrary Arena: %d contexts still active".formatted(
+                            activeContexts.size()
+                    ),
+                    firstError
+            );
+        }
+
+        synchronized (stateLock) {
+            state = State.CLOSED;
+            stateLock.notifyAll();
+        }
         arena.close();
+    }
+
+    public enum State {
+
+        OPEN,
+        CLOSING,
+        CLOSED
+
     }
 
 }

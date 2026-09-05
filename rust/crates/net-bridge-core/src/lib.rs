@@ -44,6 +44,7 @@ pub struct ConnHandle {
     /// Arc 化：读路径克隆后即可释放 DashMap guard。
     pub to_java: Arc<Mutex<(mpsc::Receiver<Bytes>, VecDeque<Bytes>)>>,
     pub to_transport: mpsc::Sender<Command>,
+    pub cancel_tx: tokio::sync::watch::Sender<bool>,
     pub server_id: Option<u64>,
     /// 服务端连接的每实例活跃计数（客户端连接为 None）；remove 时递减。
     pub server_count: Option<Arc<AtomicUsize>>,
@@ -65,6 +66,7 @@ impl ConnHandle {
         state: Arc<AtomicU32>,
         to_java_rx: mpsc::Receiver<Bytes>,
         to_transport: mpsc::Sender<Command>,
+        cancel_tx: tokio::sync::watch::Sender<bool>,
         server_id: Option<u64>,
         server_count: Option<Arc<AtomicUsize>>,
         early_write: bool,
@@ -74,6 +76,7 @@ impl ConnHandle {
             state,
             to_java: Arc::new(Mutex::new((to_java_rx, VecDeque::new()))),
             to_transport,
+            cancel_tx,
             server_id,
             server_count,
             early_write,

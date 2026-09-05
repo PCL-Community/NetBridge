@@ -31,7 +31,7 @@ public abstract class ConnectionMixin {
             Connection connection,
             CallbackInfoReturnable<ChannelFuture> cir
     ) {
-        if (NETBRIDGE_IN_PROGRESS.get()) {
+        if (NativeClientTransport.isVanillaBypass() || NETBRIDGE_IN_PROGRESS.get()) {
             return;
         }
 

@@ -7,7 +7,8 @@ import top.tangge233.netbridge.nativebridge.NativeTransportBackend;
 import top.tangge233.netbridge.transport.TransportMode;
 
 import java.net.InetSocketAddress;
-
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.jspecify.annotations.Nullable;
 
 public final class ClientRuntime implements AutoCloseable {
@@ -19,6 +20,7 @@ public final class ClientRuntime implements AutoCloseable {
     private final ConnectionStateStore stateStore;
     private final ConnectionPlanner planner;
     private final ConnectionExecutor executor;
+    private final Set<DelegatingChannelFuture> activeFutures = ConcurrentHashMap.newKeySet();
     private volatile boolean closed;
 
     public ClientRuntime(
@@ -55,7 +57,16 @@ public final class ClientRuntime implements AutoCloseable {
                 successfulEndpoints.lookup(tcpAddress, current.mode()),
                 nativeAvailable()
         );
-        return executor.execute(plan, backend, adapter);
+        var future = executor.execute(
+                plan,
+                backend,
+                adapter
+        );
+        if (future instanceof DelegatingChannelFuture dcf) {
+            activeFutures.add(dcf);
+            dcf.addListener(_ -> activeFutures.remove(dcf));
+        }
+        return future;
     }
 
     public boolean nativeAvailable() {
@@ -86,6 +97,14 @@ public final class ClientRuntime implements AutoCloseable {
         }
 
         closed = true;
+        for (var future : activeFutures) {
+            try {
+                future.cancel(true);
+            } catch (Throwable _) {
+                // ignore
+            }
+        }
+        activeFutures.clear();
         stateStore.idle();
     }
 
