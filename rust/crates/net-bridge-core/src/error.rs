@@ -81,7 +81,7 @@ pub enum BridgeError {
 }
 
 impl BridgeError {
-    /// JNI/日志边界的字符串形态。
+    /// 日志边界的字符串形态。
     pub fn message(&self) -> String {
         self.to_string()
     }

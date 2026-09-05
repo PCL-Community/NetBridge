@@ -4,10 +4,10 @@ import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.*;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class FfmNativeTransportBackend
@@ -169,8 +169,7 @@ public final class FfmNativeTransportBackend
             });
 
             connections.clear();
-            context.shutdown(2000);
-            context.destroy();
+            context.close();
         } finally {
             library.close();
             state = NativeBackendState.CLOSED;
@@ -213,7 +212,6 @@ public final class FfmNativeTransportBackend
                     }
                 }
                 case NativeEvent.KIND_WRITABLE -> {
-                    System.err.println("[dbg] WRITABLE event for " + event.objectId());
                     var conn = connections.get(event.objectId());
                     if (conn != null) {
                         conn.handleWritable();
@@ -235,7 +233,7 @@ public final class FfmNativeTransportBackend
                         pendingAccepted
                                 .computeIfAbsent(
                                         event.objectId(),
-                                        _ -> new ArrayList<>()
+                                        _ -> new CopyOnWriteArrayList<>()
                                 )
                                 .add(event.arg0());
                     }

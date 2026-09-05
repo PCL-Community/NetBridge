@@ -127,6 +127,11 @@ async fn accept_loop_in_context(
         let (to_java_tx, to_java_rx) = mpsc::channel::<bytes::Bytes>(8192);
         let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
         let Ok(conn_id) = ctx.allocate_id() else {
+            conn_count.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        };
+        if !ctx.servers_map().contains_key(&server_id) {
+            conn_count.fetch_sub(1, Ordering::Relaxed);
             continue;
         };
         ctx.conns().insert(
@@ -193,7 +198,11 @@ async fn bind_listener(
     })?;
     let listener =
         KcpUdpStream::socket_listen(Arc::new(config.clone()), udp, max_connections.max(8), None)
-            .map_err(|e| BridgeError::Other(format!("kcp listener: {e}")))?;
+            .map_err(|source| BridgeError::Setup {
+                transport: Transport::Kcp,
+                stage: "socket_listen",
+                source,
+            })?;
     Ok((listener, local))
 }
 

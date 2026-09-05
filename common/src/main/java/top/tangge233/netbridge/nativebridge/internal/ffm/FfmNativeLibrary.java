@@ -4,6 +4,8 @@ import java.lang.foreign.*;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class FfmNativeLibrary implements AutoCloseable {
@@ -12,6 +14,7 @@ public final class FfmNativeLibrary implements AutoCloseable {
     private final SymbolLookup lookup;
     private final FfmApiV1 api;
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private final Set<FfmNativeContext> activeContexts = ConcurrentHashMap.newKeySet();
 
     private FfmNativeLibrary(
             Arena arena,
@@ -46,12 +49,7 @@ public final class FfmNativeLibrary implements AutoCloseable {
             if (tableAddr.equals(MemorySegment.NULL)) {
                 throw new IllegalStateException("netbridge_get_api returned null API table");
             }
-            var tableSegment = tableAddr.reinterpret(
-                    FfmApiLayouts.API_V1.byteSize(),
-                    arena,
-                    null
-            );
-            var api = FfmApiV1.fromSegment(tableSegment);
+            var api = FfmApiV1.fromAddress(tableAddr, arena);
 
             return new FfmNativeLibrary(
                     arena,
@@ -135,7 +133,9 @@ public final class FfmNativeLibrary implements AutoCloseable {
             if (ctxAddr.equals(MemorySegment.NULL)) {
                 throw new IllegalStateException("context_create returned null context pointer");
             }
-            return new FfmNativeContext(api, ctxAddr, dispatcher);
+            var ctx = new FfmNativeContext(api, ctxAddr, dispatcher);
+            activeContexts.add(ctx);
+            return ctx;
         } catch (Throwable t) {
             if (t instanceof RuntimeException re) {
                 throw re;
@@ -163,6 +163,14 @@ public final class FfmNativeLibrary implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        for (var ctx : activeContexts) {
+            try {
+                ctx.close();
+            } catch (Throwable _) {
+                // Keep closing other contexts
+            }
+        }
+        activeContexts.clear();
         arena.close();
     }
 

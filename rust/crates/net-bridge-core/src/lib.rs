@@ -61,7 +61,6 @@ pub struct ConnHandle {
 impl ConnHandle {
     /// 构造句柄：读侧 channel 与空残留队列包装进共享锁。
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         state: Arc<AtomicU32>,
         to_java_rx: mpsc::Receiver<Bytes>,

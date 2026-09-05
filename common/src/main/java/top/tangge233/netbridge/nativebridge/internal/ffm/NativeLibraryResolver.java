@@ -126,9 +126,23 @@ public final class NativeLibraryResolver {
                 || manifest.sha256() == null
                 || manifest.artifact().isBlank()
                 || manifest.sha256().isBlank()
+                || manifest.abiMajor() == null
+                || manifest.abiMinor() == null
         ) {
             throw new NativeResourceException(
                     "RESOURCE_MANIFEST_INVALID: missing required fields in " + manifestResource
+            );
+        }
+
+        if (manifest.abiMajor() != 1) {
+            throw new NativeResourceException(
+                    "ABI_MAJOR_MISMATCH: manifest abiMajor=" + manifest.abiMajor() + " (expected 1)"
+            );
+        }
+
+        if (manifest.abiMinor() < 0) {
+            throw new NativeResourceException(
+                    "ABI_MINOR_INCOMPATIBLE: manifest abiMinor=" + manifest.abiMinor()
             );
         }
 
@@ -248,10 +262,13 @@ public final class NativeLibraryResolver {
                     target,
                     StandardCopyOption.ATOMIC_MOVE
             );
-        } catch (AtomicMoveNotSupportedException e) {
+        } catch (AtomicMoveNotSupportedException | FileAlreadyExistsException e) {
             if (Files.exists(target)) {
-                try (var in = Files.newInputStream(target)) {
-                    if (sha256Hex(in).equals(sha256Hex(Files.newInputStream(tmp)))) {
+                try (
+                        var inTarget = Files.newInputStream(target);
+                        var inTmp = Files.newInputStream(tmp)
+                ) {
+                    if (sha256Hex(inTarget).equals(sha256Hex(inTmp))) {
                         return;
                     }
                 } catch (IOException _) {

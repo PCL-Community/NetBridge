@@ -10,7 +10,7 @@ import java.net.InetSocketAddress;
 
 import org.jspecify.annotations.Nullable;
 
-public final class ClientRuntime {
+public final class ClientRuntime implements AutoCloseable {
 
     private final ClientSettingsService settings;
     private final @Nullable NativeTransportBackend backend;
@@ -19,6 +19,7 @@ public final class ClientRuntime {
     private final ConnectionStateStore stateStore;
     private final ConnectionPlanner planner;
     private final ConnectionExecutor executor;
+    private volatile boolean closed;
 
     public ClientRuntime(
             ClientSettingsService settings,
@@ -41,6 +42,11 @@ public final class ClientRuntime {
             InetSocketAddress tcpAddress,
             ConnectionExecutorAdapter adapter
     ) {
+        if (closed) {
+            stateStore.idle();
+            return adapter.openTcp(tcpAddress);
+        }
+
         var current = settings.current();
         var plan = planner.plan(
                 tcpAddress,
@@ -53,7 +59,9 @@ public final class ClientRuntime {
     }
 
     public boolean nativeAvailable() {
-        return backend != null && backend.availability().available();
+        return !closed
+                && backend != null
+                && backend.availability().available();
     }
 
     public void recordServerCapabilities(
@@ -69,6 +77,16 @@ public final class ClientRuntime {
 
     public ConnectionSnapshot snapshot() {
         return stateStore.snapshot();
+    }
+
+    @Override
+    public synchronized void close() {
+        if (closed) {
+            return;
+        }
+
+        closed = true;
+        stateStore.idle();
     }
 
 }

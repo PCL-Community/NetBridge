@@ -1,16 +1,15 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
-import top.tangge233.netbridge.NetBridge;
 import top.tangge233.netbridge.nativebridge.NativeException;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.jspecify.annotations.Nullable;
 
@@ -21,10 +20,10 @@ public final class FfmNativeContext implements AutoCloseable {
     private final FfmApiV1 api;
     private final MemorySegment contextPtr;
     private final NativeEventDispatcher dispatcher;
-    private final AtomicBoolean destroyed = new AtomicBoolean(false);
     private final AtomicLong activeOps = new AtomicLong();
     private final Object lifecycleLock = new Object();
     private volatile boolean closing;
+    private volatile boolean destroyed;
 
     public FfmNativeContext(
             FfmApiV1 api,
@@ -196,12 +195,19 @@ public final class FfmNativeContext implements AutoCloseable {
                                 MemoryLayout.PathElement.groupElement("port")
                         )
                 ));
+                var scopeId = outAddr.get(
+                        ValueLayout.JAVA_INT,
+                        FfmApiLayouts.SOCKET_ADDRESS_V1.byteOffset(
+                                MemoryLayout.PathElement.groupElement("scope_id")
+                        )
+                );
                 var addrOffset = FfmApiLayouts.SOCKET_ADDRESS_V1.byteOffset(
                         MemoryLayout.PathElement.groupElement("address")
                 );
-                byte[] ipBytes;
-                if (family == 2) {
-                    ipBytes = new byte[4];
+
+                InetAddress inet;
+                if (family == 4) {
+                    var ipBytes = new byte[4];
                     MemorySegment.copy(
                             outAddr,
                             addrOffset,
@@ -209,8 +215,9 @@ public final class FfmNativeContext implements AutoCloseable {
                             0,
                             4
                     );
-                } else {
-                    ipBytes = new byte[16];
+                    inet = InetAddress.getByAddress(ipBytes);
+                } else if (family == 6) {
+                    var ipBytes = new byte[16];
                     MemorySegment.copy(
                             outAddr,
                             addrOffset,
@@ -218,8 +225,12 @@ public final class FfmNativeContext implements AutoCloseable {
                             0,
                             16
                     );
+                    inet = scopeId != 0
+                            ? Inet6Address.getByAddress(null, ipBytes, scopeId)
+                            : InetAddress.getByAddress(ipBytes);
+                } else {
+                    throw new NativeException("UNSUPPORTED_SOCKET_FAMILY: family=" + family);
                 }
-                var inet = InetAddress.getByAddress(ipBytes);
                 return new InetSocketAddress(inet, port);
             } catch (Throwable t) {
                 throw rethrow(t, "connection_remote_address");
@@ -434,35 +445,12 @@ public final class FfmNativeContext implements AutoCloseable {
         }
     }
 
-    @Override
-    public void close() {
-        if (!destroyed.compareAndSet(false, true)) {
-            return;
-        }
-        closing = true;
-        awaitDrain();
-        shutdownLocked(2000);
-        destroyLocked();
-    }
-
-    private void awaitDrain() {
-        var deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MILLIS;
-        while (activeOps.get() > 0) {
-            if (System.currentTimeMillis() > deadline) {
-                NetBridge.LOGGER.warn(
-                        "native context drain timeout with {} active ops; forcing destroy",
-                        activeOps.get()
-                );
-                return;
-            }
-            synchronized (lifecycleLock) {
-                try {
-                    lifecycleLock.wait(20);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
+    public void shutdown(int timeoutMillis) {
+        beginOp();
+        try {
+            shutdownLocked(timeoutMillis);
+        } finally {
+            endOp();
         }
     }
 
@@ -475,6 +463,44 @@ public final class FfmNativeContext implements AutoCloseable {
         }
     }
 
+    public synchronized void destroy() {
+        close();
+    }
+
+    @Override
+    public synchronized void close() {
+        if (destroyed) {
+            return;
+        }
+
+        closing = true;
+        awaitDrain();
+        shutdownLocked(2000);
+        destroyLocked();
+        destroyed = true;
+    }
+
+    private void awaitDrain() {
+        var deadline = System.currentTimeMillis() + DRAIN_TIMEOUT_MILLIS;
+        while (activeOps.get() > 0) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new NativeException(
+                        "TIMEOUT_DRAINING_ACTIVE_OPERATIONS: cannot destroy context with %d active operations".formatted(
+                                activeOps.get()
+                        )
+                );
+            }
+            synchronized (lifecycleLock) {
+                try {
+                    lifecycleLock.wait(20);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new NativeException("INTERRUPTED_DRAINING_ACTIVE_OPERATIONS", e);
+                }
+            }
+        }
+    }
+
     private void destroyLocked() {
         try {
             var status = (int) api.contextDestroy().invokeExact(contextPtr);
@@ -482,24 +508,6 @@ public final class FfmNativeContext implements AutoCloseable {
         } catch (Throwable t) {
             throw rethrow(t, "context_destroy");
         }
-    }
-
-    public void shutdown(int timeoutMillis) {
-        beginOp();
-        try {
-            shutdownLocked(timeoutMillis);
-        } finally {
-            endOp();
-        }
-    }
-
-    public void destroy() {
-        if (!destroyed.compareAndSet(false, true)) {
-            return;
-        }
-        closing = true;
-        awaitDrain();
-        destroyLocked();
     }
 
 }

@@ -95,17 +95,20 @@ async fn serve_incoming_in_context(
     let Ok(conn) = incoming.await else {
         return;
     };
-    // accept_bi 完成才登记 + 发 ACCEPTED：Java 收到时连接已 fully ready，
-    // 之后任何失败都走终态 tombstone，而不是先 adopt 再失败。
     if !try_admit(&conn_counter, max_connections) {
+        return;
+    }
+    let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
+    let Ok(conn_id) = ctx.allocate_id() else {
+        conn_counter.fetch_sub(1, Ordering::Relaxed);
+        return;
+    };
+    if !ctx.servers_map().contains_key(&server_id) {
+        conn_counter.fetch_sub(1, Ordering::Relaxed);
         return;
     }
     let (to_transport_tx, to_transport_rx) = tokio::sync::mpsc::channel::<crate::Command>(4096);
     let (to_java_tx, to_java_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(8192);
-    let state = Arc::new(std::sync::atomic::AtomicU32::new(crate::STATE_CONNECTED));
-    let Ok(conn_id) = ctx.allocate_id() else {
-        return;
-    };
     ctx.conns().insert(
         conn_id,
         crate::ConnHandle::new(
@@ -114,25 +117,22 @@ async fn serve_incoming_in_context(
             to_transport_tx.clone(),
             Some(server_id),
             Some(conn_counter),
-            false,
+            true,
             Some(peer),
         ),
     );
     ctx.set_conn_remote_addr(conn_id, peer);
-    // ACCEPTED = 已注册、可立即 adopt（与 KCP 语义一致）；
-    // accept_bi 之前失败同样发出保证的终态事件（tombstone 模型），不会产生 zombie。
     ctx.event_sink().on_event(
         crate::event::NB_EVENT_ACCEPTED,
         server_id,
         conn_id as i64,
         0,
     );
-
-    match conn.accept_bi().await {
-        Ok((send, recv)) => {
-            ctx.spawn_connection_task(
-                "quic connection task in context",
-                conn_id,
+    let accept_ctx = Arc::clone(&ctx);
+    let to_transport_tx_runner = to_transport_tx;
+    ctx.spawn_connection_task("quic stream accept and drive", conn_id, async move {
+        match conn.accept_bi().await {
+            Ok((send, recv)) => {
                 super::connection::run_connection_with_sink(
                     conn_id,
                     conn,
@@ -140,15 +140,16 @@ async fn serve_incoming_in_context(
                     recv,
                     to_transport_rx,
                     to_java_tx,
-                    to_transport_tx,
+                    to_transport_tx_runner,
                     state,
-                    Arc::clone(&ctx),
-                ),
-            );
+                    accept_ctx,
+                )
+                .await;
+            }
+            Err(_) => {
+                state.store(crate::STATE_FAILED, Ordering::SeqCst);
+                accept_ctx.emit_terminal(conn_id);
+            }
         }
-        Err(_) => {
-            state.store(crate::STATE_FAILED, Ordering::SeqCst);
-            ctx.emit_terminal(conn_id);
-        }
-    }
+    });
 }

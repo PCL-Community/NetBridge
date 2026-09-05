@@ -15,7 +15,7 @@ pub enum TransportKind {
 }
 
 impl TransportKind {
-    /// JNI 整型标签解析：0 = QUIC，1 = KCP；其余非法返回 None。
+    /// 整型标签解析：0 = QUIC，1 = KCP；其余非法返回 None。
     pub fn from_jint(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::Quic),

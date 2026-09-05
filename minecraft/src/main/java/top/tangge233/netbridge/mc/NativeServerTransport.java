@@ -14,6 +14,7 @@ import top.tangge233.netbridge.nativebridge.NativeConnection;
 
 import java.net.InetSocketAddress;
 
+@SuppressWarnings("ConstantValue")
 public final class NativeServerTransport {
 
     private NativeServerTransport() {
@@ -23,42 +24,61 @@ public final class NativeServerTransport {
             MinecraftServer server,
             NativeConnection connection
     ) {
-        var channel = new NativeChannel(connection);
-        try {
-            channel.setRemoteAddress(connection.remoteAddress());
-        } catch (RuntimeException e) {
-            channel.setRemoteAddress(new InetSocketAddress("0.0.0.0", 0));
-        }
-
-        var pipeline = channel.pipeline();
-        pipeline.addLast("timeout", new ReadTimeoutHandler(30));
-
-        Connection.configureSerialization(
-                pipeline,
-                PacketFlow.SERVERBOUND,
-                false,
-                null
-        );
-
-        var rateLimit = server.getRateLimitPacketsPerSecond();
-        var mcConnection = rateLimit > 0
-                ? new RateKickingConnection(rateLimit)
-                : new Connection(PacketFlow.SERVERBOUND);
-
-        mcConnection.configurePacketHandler(pipeline);
-        mcConnection.setListenerForServerboundHandshake(
-                new ServerHandshakePacketListenerImpl(server, mcConnection)
-        );
-
         server.execute(() -> {
-            var group = (EventLoopGroup) ServerConnectionListener.SERVER_EVENT_GROUP.get();
-            group.register(channel).syncUninterruptibly();
-            server.getConnection().getConnections().add(mcConnection);
-            NetBridge.LOGGER.info(
-                    "Connection {} adopted into server pipeline (channel {})",
-                    connection.id(),
-                    channel.connId()
+            var channel = new NativeChannel(connection);
+            try {
+                channel.setRemoteAddress(connection.remoteAddress());
+            } catch (RuntimeException e) {
+                channel.setRemoteAddress(new InetSocketAddress("0.0.0.0", 0));
+            }
+
+            var pipeline = channel.pipeline();
+            pipeline.addLast("timeout", new ReadTimeoutHandler(30));
+
+            Connection.configureSerialization(
+                    pipeline,
+                    PacketFlow.SERVERBOUND,
+                    false,
+                    null
             );
+
+            var rateLimit = server.getRateLimitPacketsPerSecond();
+            var mcConnection = rateLimit > 0
+                    ? new RateKickingConnection(rateLimit)
+                    : new Connection(PacketFlow.SERVERBOUND);
+
+            mcConnection.configurePacketHandler(pipeline);
+            mcConnection.setListenerForServerboundHandshake(
+                    new ServerHandshakePacketListenerImpl(server, mcConnection)
+            );
+
+            var serverConnection = server.getConnection();
+            if (serverConnection == null) {
+                channel.close();
+                return;
+            }
+
+            var group = (EventLoopGroup) ServerConnectionListener.SERVER_EVENT_GROUP.get();
+            var regFuture = group.register(channel);
+            regFuture.addListener(f -> {
+                if (f.isSuccess()) {
+                    server.execute(() -> {
+                        var sc = server.getConnection();
+                        if (sc != null && channel.isOpen()) {
+                            sc.getConnections().add(mcConnection);
+                            NetBridge.LOGGER.info(
+                                    "Connection {} adopted into server pipeline (channel {})",
+                                    connection.id(),
+                                    channel.connId()
+                            );
+                        } else {
+                            channel.close();
+                        }
+                    });
+                } else {
+                    channel.close();
+                }
+            });
         });
     }
 

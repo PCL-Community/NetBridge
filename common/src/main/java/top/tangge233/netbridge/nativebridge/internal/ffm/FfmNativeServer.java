@@ -44,13 +44,13 @@ public final class FfmNativeServer implements NativeServer {
     }
 
     @Override
-    public void setListener(NativeServerListener listener) {
+    public synchronized void setListener(NativeServerListener listener) {
         this.listener = listener;
         acceptedChildren.forEach(listener::onAccepted);
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (closed) {
             return;
         }

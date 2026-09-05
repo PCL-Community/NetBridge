@@ -4,7 +4,6 @@ import top.tangge233.netbridge.nativebridge.*;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import org.jspecify.annotations.Nullable;
@@ -84,10 +83,13 @@ public final class FfmNativeConnection implements NativeConnection {
         if (remaining == 0) {
             return NativeIoResult.progressed(0);
         }
+        var toWrite = Math.min(remaining, 65536);
 
         if (source.isDirect()) {
-            var segment = MemorySegment.ofBuffer(source.slice());
-            var result = owner.context().connectionWrite(id, segment, remaining);
+            var directSlice = source.slice();
+            directSlice.limit(toWrite);
+            var segment = MemorySegment.ofBuffer(directSlice);
+            var result = owner.context().connectionWrite(id, segment, toWrite);
 
             if (result.closed()) {
                 markClosedByQuery();
@@ -104,9 +106,11 @@ public final class FfmNativeConnection implements NativeConnection {
         }
 
         try (var arena = Arena.ofConfined()) {
-            var segment = arena.allocate(remaining, 1);
-            segment.copyFrom(MemorySegment.ofBuffer(source.slice()));
-            var result = owner.context().connectionWrite(id, segment, remaining);
+            var directSlice = source.slice();
+            directSlice.limit(toWrite);
+            var segment = arena.allocate(toWrite, 1);
+            segment.copyFrom(MemorySegment.ofBuffer(directSlice));
+            var result = owner.context().connectionWrite(id, segment, toWrite);
 
             if (result.closed()) {
                 markClosedByQuery();
@@ -130,10 +134,13 @@ public final class FfmNativeConnection implements NativeConnection {
         if (capacity == 0) {
             return NativeIoResult.progressed(0);
         }
+        var toRead = Math.min(capacity, 65536);
 
         if (target.isDirect()) {
-            var segment = MemorySegment.ofBuffer(target.slice());
-            var result = owner.context().connectionRead(id, segment, capacity);
+            var directSlice = target.slice();
+            directSlice.limit(toRead);
+            var segment = MemorySegment.ofBuffer(directSlice);
+            var result = owner.context().connectionRead(id, segment, toRead);
 
             if (result.closed()) {
                 markClosedByQuery();
@@ -154,8 +161,8 @@ public final class FfmNativeConnection implements NativeConnection {
         }
 
         try (var arena = Arena.ofConfined()) {
-            var segment = arena.allocate(capacity, 1);
-            var result = owner.context().connectionRead(id, segment, capacity);
+            var segment = arena.allocate(toRead, 1);
+            var result = owner.context().connectionRead(id, segment, toRead);
 
             if (result.closed()) {
                 markClosedByQuery();
@@ -171,14 +178,15 @@ public final class FfmNativeConnection implements NativeConnection {
                 return NativeIoResult.WOULD_BLOCK;
             }
 
-            var bytes = segment.toArray(ValueLayout.JAVA_BYTE);
+            var bytes = new byte[n];
+            MemorySegment.copy(segment, 0, MemorySegment.ofArray(bytes), 0, n);
             target.put(bytes, 0, n);
             return NativeIoResult.progressed(n);
         }
     }
 
     @Override
-    public void setListener(NativeConnectionListener listener) {
+    public synchronized void setListener(NativeConnectionListener listener) {
         this.listener = listener;
         var st = state();
         if (st != NativeConnectionState.CONNECTING) {
@@ -187,7 +195,7 @@ public final class FfmNativeConnection implements NativeConnection {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (closed) {
             return;
         }

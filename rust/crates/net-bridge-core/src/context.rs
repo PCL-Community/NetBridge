@@ -77,8 +77,12 @@ impl NativeContext {
 
     /// 分配永不复用、永不产生的 id；回绕即 context 级 fatal。
     pub fn allocate_id(&self) -> Result<u64, BridgeError> {
+        if self.next_id.load(Ordering::SeqCst) == 0 {
+            return Err(BridgeError::IdOverflow);
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         if id == 0 {
+            self.next_id.store(0, Ordering::SeqCst);
             return Err(BridgeError::IdOverflow);
         }
         Ok(id)
@@ -554,6 +558,8 @@ mod tests {
         ctx.next_id.store(u64::MAX - 1, Ordering::SeqCst);
         assert_eq!(ctx.allocate_id().expect("first"), u64::MAX - 1);
         assert_eq!(ctx.allocate_id().expect("second"), u64::MAX);
+        assert!(matches!(ctx.allocate_id(), Err(BridgeError::IdOverflow)));
+        assert!(matches!(ctx.allocate_id(), Err(BridgeError::IdOverflow)));
         assert!(matches!(ctx.allocate_id(), Err(BridgeError::IdOverflow)));
     }
 

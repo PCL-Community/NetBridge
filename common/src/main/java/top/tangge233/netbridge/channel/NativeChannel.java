@@ -191,10 +191,14 @@ public class NativeChannel extends AbstractChannel {
 
             if (res.wouldBlock()) {
                 backpressured.set(true);
+                unsafe().outboundBuffer().setUserDefinedWritability(1, false);
                 return 0;
             }
 
             backpressured.set(false);
+            if (unsafe().outboundBuffer() != null) {
+                unsafe().outboundBuffer().setUserDefinedWritability(1, true);
+            }
         }
         in.remove();
         return 1;
@@ -238,6 +242,9 @@ public class NativeChannel extends AbstractChannel {
 
     private void onNativeWritable() {
         backpressured.set(false);
+        if (unsafe().outboundBuffer() != null) {
+            unsafe().outboundBuffer().setUserDefinedWritability(1, true);
+        }
         if (connected && !closed.get()) {
             unsafe().flush();
         }

@@ -5,9 +5,6 @@ import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 
-/**
- * Java 25 Foreign Function & Memory API 内存布局与函数描述符定义。
- */
 public final class FfmApiLayouts {
 
     public static final StructLayout BYTES_VIEW_V1 = MemoryLayout.structLayout(
@@ -65,6 +62,14 @@ public final class FfmApiLayouts {
             MemoryLayout.paddingLayout(4),
             MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_LONG).withName("reserved")
     ).withName("nb_server_options_v1");
+
+    public static final StructLayout API_HEADER_V1 = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withName("abi_major"),
+            ValueLayout.JAVA_INT.withName("abi_minor"),
+            ValueLayout.JAVA_INT.withName("struct_size"),
+            ValueLayout.JAVA_INT.withName("reserved0"),
+            ValueLayout.JAVA_LONG.withName("feature_bits")
+    ).withName("nb_api_header_v1");
 
     public static final StructLayout API_V1 = MemoryLayout.structLayout(
             ValueLayout.JAVA_INT.withName("abi_major"),

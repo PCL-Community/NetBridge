@@ -84,6 +84,9 @@ unsafe extern "C" fn context_create(
                 if (*options).struct_size < size_of::<NbContextOptionsV1>() as u32 {
                     return NB_INVALID_ARGUMENT;
                 }
+                if (*options).flags != 0 {
+                    return NB_UNSUPPORTED;
+                }
                 (*options).worker_threads as usize
             }
         } else {
@@ -145,6 +148,9 @@ unsafe extern "C" fn connect(
         let opts = unsafe { &*options };
         if opts.struct_size < size_of::<NbConnectOptionsV1>() as u32 {
             return NB_INVALID_ARGUMENT;
+        }
+        if opts.flags != 0 {
+            return NB_UNSUPPORTED;
         }
         let kind = match decode_transport_kind(opts.transport_kind) {
             Ok(k) => k,
@@ -272,6 +278,9 @@ unsafe extern "C" fn connection_read(
         if capacity > 0 && data.is_null() {
             return NB_INVALID_ARGUMENT;
         }
+        if capacity > 65536 {
+            return NB_INVALID_ARGUMENT;
+        }
 
         let ctx = unsafe { &(*context).0 };
         match ctx.read_chunk(connection, capacity as usize) {
@@ -285,7 +294,11 @@ unsafe extern "C" fn connection_read(
                 unsafe {
                     *out_read = n as u32;
                 }
-                NB_OK
+                if n == 0 && capacity > 0 {
+                    NB_WOULD_BLOCK
+                } else {
+                    NB_OK
+                }
             }
             Err(e) => map_error(e),
         }
@@ -318,6 +331,9 @@ unsafe extern "C" fn server_start(
         let opts = unsafe { &*options };
         if opts.struct_size < size_of::<NbServerOptionsV1>() as u32 {
             return NB_INVALID_ARGUMENT;
+        }
+        if opts.flags != 0 {
+            return NB_UNSUPPORTED;
         }
         let kind = match decode_transport_kind(opts.transport_kind) {
             Ok(k) => k,

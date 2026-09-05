@@ -1,8 +1,7 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
-/**
- * C ABI nb_status_t 状态码常量与检查辅助。
- */
+import top.tangge233.netbridge.nativebridge.NativeException;
+
 public final class FfmStatus {
 
     public static final int NB_OK = 0;
@@ -30,7 +29,7 @@ public final class FfmStatus {
             return;
         }
 
-        throw new IllegalStateException(
+        throw new NativeException(
                 "Native operation '%s' failed with status %d (%s)".formatted(
                         operation,
                         status,

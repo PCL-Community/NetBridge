@@ -66,6 +66,7 @@ public final class NetBridgeRuntime implements AutoCloseable {
 
         closed = true;
         serverRuntime.close();
+        clientRuntime.close();
         try {
             nativeBackend.close();
         } catch (RuntimeException e) {

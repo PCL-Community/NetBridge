@@ -28,10 +28,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
 
       - name: Architecture verification (FFM allowlist / JNI zero / purity)
-        run: gradle verifyArchitecture -PskipNativeBuild
+        run: ./gradlew verifyArchitecture -PskipNativeBuild
 
       - name: Java tests (no native required)
-        run: gradle test -PskipNativeBuild
+        run: ./gradlew test -PskipNativeBuild
 
   rust-unit:
     name: Rust fmt / clippy / test
@@ -95,7 +95,7 @@ jobs:
           echo "exported business symbols: $symbols"
 
       - name: Generate native manifest
-        run: gradle generateNativeManifest -PnativeProfile=release
+        run: ./gradlew generateNativeManifest -PnativeProfile=release
 
       - name: FFM integration tests (--illegal-native-access=deny)
-        run: gradle :common:nativeIntegrationTest -PnativeProfile=release
+        run: ./gradlew :common:nativeIntegrationTest -PnativeProfile=release

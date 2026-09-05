@@ -30,7 +30,7 @@ pub async fn run_connection_with_sink(
         .map(|h| h.write_blocked.clone())
         .unwrap_or_default();
     let sink = Arc::clone(ctx.event_sink());
-    let (_reader_done_tx, mut reader_done_rx) = mpsc::channel::<()>(1);
+    let (reader_done_tx, mut reader_done_rx) = mpsc::channel::<()>(1);
     let reader = {
         let _to_transport_tx = to_transport_tx.clone();
         let sink = Arc::clone(&sink);
@@ -56,6 +56,7 @@ pub async fn run_connection_with_sink(
                     Err(_) => break,
                 }
             }
+            let _ = reader_done_tx.send(()).await;
         })
     };
 

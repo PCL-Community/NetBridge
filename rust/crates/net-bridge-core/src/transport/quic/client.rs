@@ -30,7 +30,7 @@ pub fn connect_in_context(
             to_transport_tx.clone(),
             None,
             None,
-            false,
+            true,
             None,
         ),
     );
@@ -38,10 +38,7 @@ pub fn connect_in_context(
     let host = host.to_string();
     let ctx_task = Arc::clone(ctx);
     ctx.spawn_connection_task("quic connect task in context", conn_id, async move {
-        let mut rx = to_transport_rx;
-        if let Some((conn, send, recv)) =
-            establish(&ctx_task, &host, port, conn_id, &state, &mut rx).await
-        {
+        if let Some((conn, send, recv)) = establish(&ctx_task, &host, port, conn_id, &state).await {
             state.store(STATE_CONNECTED, Ordering::SeqCst);
             ctx_task.event_sink().on_event(
                 crate::event::NB_EVENT_CONNECTION_STATE,
@@ -54,7 +51,7 @@ pub fn connect_in_context(
                 conn,
                 send,
                 recv,
-                rx,
+                to_transport_rx,
                 to_java_tx,
                 to_transport_tx,
                 state,
@@ -75,7 +72,6 @@ async fn establish(
     port: u16,
     conn_id: u64,
     state: &Arc<AtomicU32>,
-    to_transport_rx: &mut mpsc::Receiver<Command>,
 ) -> Option<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
     let addr = resolve_addr(ctx, host, port, conn_id, state).await?;
     let socket = match socket_util::bind_client(addr.is_ipv6()) {
@@ -119,15 +115,9 @@ async fn establish(
         Ok(connecting) => connecting,
         Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
     };
-    let conn = tokio::select! {
-        result = connecting => match result {
-            Ok(conn) => conn,
-            Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
-        },
-        _ = to_transport_rx.recv() => {
-            cancel(ctx, conn_id, state);
-            return None;
-        }
+    let conn = match connecting.await {
+        Ok(conn) => conn,
+        Err(e) => return fail(ctx, conn_id, state, connect_error(addr, e)),
     };
     let (send, recv) = match conn.open_bi().await {
         Ok(pair) => pair,

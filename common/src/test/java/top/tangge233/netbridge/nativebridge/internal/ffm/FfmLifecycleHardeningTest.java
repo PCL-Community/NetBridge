@@ -4,6 +4,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import top.tangge233.netbridge.nativebridge.*;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -288,6 +290,11 @@ class FfmLifecycleHardeningTest {
             var serverConn = acceptedRef.get();
             awaitState(serverConn, NativeConnectionState.CONNECTED);
 
+            var remote = serverConn.remoteAddress();
+            assertNotNull(remote);
+            assertEquals("127.0.0.1", remote.getAddress().getHostAddress());
+            assertTrue(remote.getPort() > 0);
+
             serverConn.close();
             assertThrows(
                     NativeException.class,
@@ -296,6 +303,77 @@ class FfmLifecycleHardeningTest {
 
             client.close();
             server.close();
+        }
+    }
+
+    @Test
+    void safePrefixTableRejectsTruncatedSize() {
+        try (var arena = Arena.ofConfined()) {
+            var fakeTable = arena.allocate(
+                    32,
+                    8
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    0,
+                    1
+            ); // major
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    4,
+                    0
+            ); // minor
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    8,
+                    16
+            ); // struct_size too small
+            fakeTable.set(
+                    ValueLayout.JAVA_LONG,
+                    16,
+                    0
+            ); // features
+
+            var ex = assertThrows(
+                    IllegalStateException.class,
+                    () -> FfmApiV1.fromAddress(fakeTable, arena)
+            );
+            var msg = ex.getMessage();
+            assertNotNull(msg);
+            assertTrue(msg.contains("Truncated API table"));
+        }
+    }
+
+    @Test
+    void safePrefixTableRejectsMajorMismatch() {
+        try (var arena = Arena.ofConfined()) {
+            var fakeTable = arena.allocate(
+                    FfmApiLayouts.API_V1.byteSize(),
+                    8
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    0,
+                    2
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    4,
+                    0
+            );
+            fakeTable.set(
+                    ValueLayout.JAVA_INT,
+                    8,
+                    (int) FfmApiLayouts.API_V1.byteSize()
+            );
+
+            var ex = assertThrows(
+                    IllegalStateException.class,
+                    () -> FfmApiV1.fromAddress(fakeTable, arena)
+            );
+            var msg = ex.getMessage();
+            assertNotNull(msg);
+            assertTrue(msg.contains("Unsupported ABI major"));
         }
     }
 

@@ -46,7 +46,9 @@ fn wait_terminal(ctx: &NativeContext, conn: u64) {
 fn wait_read(ctx: &NativeContext, conn: u64, want: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(data) = ctx.read_chunk(conn, 65536)
+        let res = ctx.read_chunk(conn, 65536);
+        if let Ok(data) = res
+            && !data.is_empty()
             && data.len() >= want
         {
             return data.to_vec();
@@ -98,18 +100,16 @@ fn quic_loopback_roundtrip() {
     let client = ctx
         .connect(TransportKind::Quic, "127.0.0.1", port, Default::default())
         .expect("connect");
-    wait_state(&ctx, client, STATE_CONNECTED);
-
-    let server_conn = wait_accepted(&sink, server);
-    assert_eq!(ctx.connection_state(server_conn), Some(STATE_CONNECTED));
-
-    // client -> server
     let payload = b"net-bridge hello over bridge";
+    wait_state(&ctx, client, STATE_CONNECTED);
+    let server_conn = wait_accepted(&sink, server);
+    wait_state(&ctx, server_conn, STATE_CONNECTED);
     assert_eq!(
         ctx.write_chunk(client, Bytes::copy_from_slice(payload))
             .expect("client write"),
         payload.len()
     );
+    assert_eq!(ctx.connection_state(server_conn), Some(STATE_CONNECTED));
     assert_eq!(wait_read(&ctx, server_conn, payload.len()), payload);
 
     // server -> client

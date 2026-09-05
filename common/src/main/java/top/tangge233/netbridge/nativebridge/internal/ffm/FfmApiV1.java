@@ -1,14 +1,8 @@
 package top.tangge233.netbridge.nativebridge.internal.ffm;
 
-import java.lang.foreign.Linker;
-import java.lang.foreign.MemoryLayout;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
+import java.lang.foreign.*;
 import java.lang.invoke.MethodHandle;
 
-/**
- * 已绑定的 NbApiV1 函数表下调用句柄集合。
- */
 public record FfmApiV1(
         MethodHandle contextCreate,
         MethodHandle contextShutdown,
@@ -67,44 +61,142 @@ public record FfmApiV1(
     }
 
     public static FfmApiV1 fromSegment(MemorySegment tableSegment) {
+        return fromAddress(tableSegment, Arena.global());
+    }
+
+    public static FfmApiV1 fromAddress(
+            MemorySegment tableAddress,
+            Arena arena
+    ) {
+        if (tableAddress.equals(MemorySegment.NULL)) {
+            throw new IllegalStateException("Null API table pointer");
+        }
+
+        var headerSegment = tableAddress.reinterpret(
+                FfmApiLayouts.API_HEADER_V1.byteSize(),
+                arena,
+                null
+        );
+
+        var major = headerSegment.get(
+                ValueLayout.JAVA_INT,
+                FfmApiLayouts.API_HEADER_V1.byteOffset(
+                        MemoryLayout.PathElement.groupElement("abi_major")
+                )
+        );
+        var minor = headerSegment.get(
+                ValueLayout.JAVA_INT,
+                FfmApiLayouts.API_HEADER_V1.byteOffset(
+                        MemoryLayout.PathElement.groupElement("abi_minor")
+                )
+        );
+        var reportedSize = headerSegment.get(
+                ValueLayout.JAVA_INT,
+                FfmApiLayouts.API_HEADER_V1.byteOffset(
+                        MemoryLayout.PathElement.groupElement("struct_size")
+                )
+        );
+        var features = headerSegment.get(
+                ValueLayout.JAVA_LONG,
+                FfmApiLayouts.API_HEADER_V1.byteOffset(
+                        MemoryLayout.PathElement.groupElement("feature_bits")
+                )
+        );
+
+        if (major != 1) {
+            throw new IllegalStateException(
+                    "Unsupported ABI major version: " + major + " (expected 1)"
+            );
+        }
+        if (minor < 0) {
+            throw new IllegalStateException(
+                    "Unsupported ABI minor version: " + minor
+            );
+        }
+
+        var minRequiredSize = FfmApiLayouts.API_V1.byteOffset(
+                MemoryLayout.PathElement.groupElement("server_stop")
+        ) + ValueLayout.ADDRESS.byteSize();
+        if (reportedSize < minRequiredSize) {
+            throw new IllegalStateException(
+                    "Truncated API table: struct_size=%d < minRequired=%d".formatted(
+                            reportedSize,
+                            minRequiredSize
+                    )
+            );
+        }
+
+        var safeSize = Math.min(reportedSize, (int) FfmApiLayouts.API_V1.byteSize());
+        var fullSegment = tableAddress.reinterpret(safeSize, arena, null);
         var linker = Linker.nativeLinker();
 
-        var major = tableSegment.get(
-                ValueLayout.JAVA_INT,
-                FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement("abi_major"))
+        var contextCreatePtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "context_create"
         );
-        var minor = tableSegment.get(
-                ValueLayout.JAVA_INT,
-                FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement("abi_minor"))
+        var contextShutdownPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "context_shutdown"
         );
-        var size = tableSegment.get(
-                ValueLayout.JAVA_INT,
-                FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement("struct_size"))
-        );
-        var features = tableSegment.get(
-                ValueLayout.JAVA_LONG,
-                FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement("feature_bits"))
+        var contextDestroyPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "context_destroy"
         );
 
-        var contextCreatePtr = getFnPtr(tableSegment, "context_create");
-        var contextShutdownPtr = getFnPtr(tableSegment, "context_shutdown");
-        var contextDestroyPtr = getFnPtr(tableSegment, "context_destroy");
+        var connectPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "connect"
+        );
+        var connectionStatePtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_state"
+        );
+        var connectionRemoteAddressPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_remote_address"
+        );
+        var connectionWritePtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_write"
+        );
+        var connectionReadPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_read"
+        );
+        var connectionClosePtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "connection_close"
+        );
 
-        var connectPtr = getFnPtr(tableSegment, "connect");
-        var connectionStatePtr = getFnPtr(tableSegment, "connection_state");
-        var connectionRemoteAddressPtr = getFnPtr(tableSegment, "connection_remote_address");
-        var connectionWritePtr = getFnPtr(tableSegment, "connection_write");
-        var connectionReadPtr = getFnPtr(tableSegment, "connection_read");
-        var connectionClosePtr = getFnPtr(tableSegment, "connection_close");
-
-        var serverStartPtr = getFnPtr(tableSegment, "server_start");
-        var serverPortPtr = getFnPtr(tableSegment, "server_port");
-        var serverStopPtr = getFnPtr(tableSegment, "server_stop");
+        var serverStartPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "server_start"
+        );
+        var serverPortPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "server_port"
+        );
+        var serverStopPtr = getFnPtr(
+                fullSegment,
+                reportedSize,
+                "server_stop"
+        );
 
         return new FfmApiV1(
                 major,
                 minor,
-                size,
+                reportedSize,
                 features,
                 linker.downcallHandle(
                         contextCreatePtr,
@@ -159,9 +251,15 @@ public record FfmApiV1(
 
     private static MemorySegment getFnPtr(
             MemorySegment segment,
+            int structSize,
             String name
     ) {
         var offset = FfmApiLayouts.API_V1.byteOffset(MemoryLayout.PathElement.groupElement(name));
+        if (offset + ValueLayout.ADDRESS.byteSize() > structSize) {
+            throw new IllegalStateException(
+                    "Field %s offset exceeds reported struct_size: %d".formatted(name, structSize)
+            );
+        }
         var addr = segment.get(ValueLayout.ADDRESS, offset);
         if (addr.equals(MemorySegment.NULL)) {
             throw new IllegalStateException("Function pointer in API table is null: " + name);

@@ -18,10 +18,6 @@ public class MinecraftServerLifecycleMixin {
     )
     private void netbridge$startAcceptors(CallbackInfo ci) {
         var self = (MinecraftServer) (Object) this;
-        if (!self.isDedicatedServer()) {
-            return;
-        }
-
         var serverRuntime = NetBridgeServices.serverRuntime();
         serverRuntime.setAdopter(connection ->
                 NativeServerTransport.adopt(self, connection)
